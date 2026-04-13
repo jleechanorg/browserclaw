@@ -87,7 +87,9 @@ def main() -> None:
         catalog = infer_endpoint_catalog(args.har, site=args.site)
         if args.provider and args.model:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
-        Path(args.output).write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
         print(args.output)
         return
 

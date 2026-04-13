@@ -17,8 +17,8 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
         body_arg_names = [key.replace("-", "_") for key in endpoint.request_body_keys]
         seen: set[str] = set()
         all_arg_names = [name for name in query_arg_names + body_arg_names if name not in seen and not seen.add(name)]
-        # Only use * if there are keyword-only args; otherwise just self
-        method_args = ["self", "*", *all_arg_names] if all_arg_names else ["self"]
+        # Only use * if there are keyword-only args with defaults; otherwise just self
+        method_args = ["self", "*", *(f"{name}=None" for name in all_arg_names)] if all_arg_names else ["self"]
         method_name = _python_method_name(endpoint.name)
         query_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.query_keys]) or ""
         json_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.request_body_keys]) or ""
@@ -54,6 +54,7 @@ def render_mcp_tools(catalog: EndpointCatalog) -> dict:
                 "type": "string",
                 "description": f"Inferred parameter for {key}",
             }
+            required.append(safe_name)
         tools.append(
             {
                 "name": endpoint.name,
