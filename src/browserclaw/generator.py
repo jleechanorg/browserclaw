@@ -16,7 +16,12 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
         query_arg_names = [key.replace("-", "_") for key in endpoint.query_keys]
         body_arg_names = [key.replace("-", "_") for key in endpoint.request_body_keys]
         method_args = ["self", "*"]
-        method_args.extend(f"{name}=None" for name in query_arg_names + body_arg_names)
+        # Deduplicate overlapping query/body args to avoid duplicate Python parameter names
+        seen: set[str] = set()
+        for name in query_arg_names + body_arg_names:
+            if name not in seen:
+                seen.add(name)
+                method_args.append(f"{name}=None")
         method_name = _python_method_name(endpoint.name)
         query_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.query_keys]) or ""
         json_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.request_body_keys]) or ""
