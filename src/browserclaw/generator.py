@@ -15,7 +15,29 @@ def _python_method_name(name: str) -> str:
 
 
 def _extract_path_params(url_template: str) -> list[str]:
-    return _PATH_PARAM_RE.findall(url_template)
+    # Return unique path param names with index suffixes to avoid duplicates
+    seen: dict[str, int] = {}
+    params = []
+    for match in _PATH_PARAM_RE.finditer(url_template):
+        key = match.group(1)
+        count = seen.get(key, 0)
+        seen[key] = count + 1
+        unique_name = f"{key}_{count}" if count > 0 else key
+        params.append(unique_name)
+    return params
+
+
+def _format_url(url_template: str, path_params: list[str]) -> str:
+    # Build keyword args for .format() from unique param names
+    seen: dict[str, int] = {}
+    format_args = []
+    for match in _PATH_PARAM_RE.finditer(url_template):
+        key = match.group(1)
+        count = seen.get(key, 0)
+        seen[key] = count + 1
+        unique_name = f"{key}_{count}" if count > 0 else key
+        format_args.append(f"{unique_name}={unique_name}")
+    return url_template + ".format(" + ", ".join(format_args) + ")"
 
 
 def render_python_client(catalog: EndpointCatalog, *, class_name: str = "BrowserClawClient") -> str:
@@ -33,11 +55,11 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
         method_name = _python_method_name(endpoint.name)
         query_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.query_keys]) or ""
         json_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.request_body_keys]) or ""
-        url_for_format = endpoint.url_template
+        url_for_format = _format_url(endpoint.url_template, path_param_names)
         methods.append(
             f"""    def {method_name}({", ".join(method_args)}):\n"""
             f"""        \"\"\"{endpoint.description}\"\"\"\n"""
-            f"""        url = "{url_for_format}".format({", ".join(f"{n}={n}" for n in path_param_names)})\n"""
+            f"""        url = "{url_for_format}"\n"""
             f"""        params = {{{query_payload}}}\n"""
             f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
             f"""        payload = {{{json_payload}}}\n"""
