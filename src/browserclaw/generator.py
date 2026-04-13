@@ -1,37 +1,50 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .models import EndpointCatalog
+
+
+_PATH_PARAM_RE = re.compile(r"\{(\w+)\}")
 
 
 def _python_method_name(name: str) -> str:
     return name.replace("-", "_")
 
 
+def _extract_path_params(url_template: str) -> list[str]:
+    return _PATH_PARAM_RE.findall(url_template)
+
+
 def render_python_client(catalog: EndpointCatalog, *, class_name: str = "BrowserClawClient") -> str:
     methods: list[str] = []
     for endpoint in catalog.endpoints:
+        path_param_names = _extract_path_params(endpoint.url_template)
         query_arg_names = [key.replace("-", "_") for key in endpoint.query_keys]
         body_arg_names = [key.replace("-", "_") for key in endpoint.request_body_keys]
         seen: set[str] = set()
         all_arg_names = [name for name in query_arg_names + body_arg_names if name not in seen and not seen.add(name)]
-        # Only use * if there are keyword-only args with defaults; otherwise just self
-        method_args = ["self", "*", *(f"{name}=None" for name in all_arg_names)] if all_arg_names else ["self"]
+        # Path params are positional, query/body params are keyword-only with defaults
+        positional_args = ["self", *path_param_names]
+        keyword_args = [f"{name}=None" for name in all_arg_names] if all_arg_names else []
+        method_args = positional_args + (["*"] + keyword_args if keyword_args else [])
         method_name = _python_method_name(endpoint.name)
         query_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.query_keys]) or ""
         json_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.request_body_keys]) or ""
+        url_for_format = endpoint.url_template
         methods.append(
             f"""    def {method_name}({", ".join(method_args)}):\n"""
             f"""        \"\"\"{endpoint.description}\"\"\"\n"""
+            f"""        url = "{url_for_format}".format({", ".join(path_param_names)})\n"""
             f"""        params = {{{query_payload}}}\n"""
             f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
             f"""        payload = {{{json_payload}}}\n"""
             f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
             f"""        response = self.session.request(\n"""
             f"""            "{endpoint.method}",\n"""
-            f"""            "{endpoint.url_template}",\n"""
+            f"""            url,\n"""
             f"""            params=params or None,\n"""
             f"""            json=payload or None,\n"""
             f"""        )\n"""

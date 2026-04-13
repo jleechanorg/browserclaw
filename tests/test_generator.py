@@ -14,7 +14,7 @@ def test_render_python_client_contains_inferred_methods() -> None:
     catalog = infer_endpoint_catalog(FIXTURE, site="linkedin")
     rendered = render_python_client(catalog)
     assert "def get_api_graphql" in rendered
-    assert "def create_updates_reactions" in rendered
+    assert "def create_api_feed_updates_reactions" in rendered
 
 
 def test_render_mcp_tools_emits_schema() -> None:

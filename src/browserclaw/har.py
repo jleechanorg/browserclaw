@@ -52,7 +52,8 @@ def _entry_is_api_like(entry: dict) -> bool:
 
 def _operation_name(method: str, generalized_path: str) -> str:
     cleaned = [part for part in generalized_path.strip("/").split("/") if part and not part.startswith("{")]
-    tail = cleaned[-2:] if cleaned else ["root"]
+    # Use up to 4 segments to avoid collisions from version-prefix differences
+    segments = cleaned[-4:] if cleaned else ["root"]
     verb = {
         "GET": "get",
         "POST": "create",
@@ -60,7 +61,7 @@ def _operation_name(method: str, generalized_path: str) -> str:
         "PATCH": "patch",
         "DELETE": "delete",
     }.get(method.upper(), method.lower())
-    return "_".join([verb, *tail]).replace("-", "_")
+    return "_".join([verb, *segments]).replace("-", "_")
 
 
 def infer_endpoint_catalog(har_path: str | Path, *, site: str | None = None) -> EndpointCatalog:
