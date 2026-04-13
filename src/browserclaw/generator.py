@@ -32,7 +32,7 @@ def _extract_path_params(url_template: str) -> list[str]:
 
 def _format_url(url_template: str, path_params: list[str]) -> str:
     # Use positional args so duplicate {id} placeholders fill in left-to-right order
-    return url_template + ".format(" + ", ".join(path_params) + ")"
+    return f'"{url_template}".format(' + ", ".join(path_params) + ")"
 
 
 def render_python_client(catalog: EndpointCatalog, *, class_name: str = "BrowserClawClient") -> str:
