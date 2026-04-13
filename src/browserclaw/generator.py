@@ -41,8 +41,13 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
         path_param_names = _extract_path_params(endpoint.url_template)
         query_arg_names = [key.replace("-", "_") for key in endpoint.query_keys]
         body_arg_names = [key.replace("-", "_") for key in endpoint.request_body_keys]
+        # Deduplicate query/body args, excluding any that collide with path params
+        path_set = set(path_param_names)
         seen: set[str] = set()
-        all_arg_names = [name for name in query_arg_names + body_arg_names if name not in seen and not seen.add(name)]
+        all_arg_names = [
+            name for name in query_arg_names + body_arg_names
+            if name not in path_set and name not in seen and not seen.add(name)
+        ]
         # Path params are positional, query/body params are keyword-only with defaults
         positional_args = ["self", *path_param_names]
         keyword_args = [f"{name}=None" for name in all_arg_names] if all_arg_names else []
