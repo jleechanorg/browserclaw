@@ -37,7 +37,7 @@ def _format_url(url_template: str, path_params: list[str]) -> str:
         seen[key] = count + 1
         unique_name = f"{key}_{count}" if count > 0 else key
         format_args.append(f"{unique_name}={unique_name}")
-    return url_template + ".format(" + ", ".join(format_args) + ")"
+    return f'"{url_template}".format(' + ", ".join(format_args) + ")"
 
 
 def render_python_client(catalog: EndpointCatalog, *, class_name: str = "BrowserClawClient") -> str:
@@ -59,7 +59,7 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
         methods.append(
             f"""    def {method_name}({", ".join(method_args)}):\n"""
             f"""        \"\"\"{endpoint.description}\"\"\"\n"""
-            f"""        url = "{url_for_format}"\n"""
+            f"""        url = {url_for_format}\n"""
             f"""        params = {{{query_payload}}}\n"""
             f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
             f"""        payload = {{{json_payload}}}\n"""
