@@ -37,7 +37,7 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
         methods.append(
             f"""    def {method_name}({", ".join(method_args)}):\n"""
             f"""        \"\"\"{endpoint.description}\"\"\"\n"""
-            f"""        url = "{url_for_format}".format({", ".join(path_param_names)})\n"""
+            f"""        url = "{url_for_format}".format({", ".join(f"{n}={n}" for n in path_param_names)})\n"""
             f"""        params = {{{query_payload}}}\n"""
             f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
             f"""        payload = {{{json_payload}}}\n"""
