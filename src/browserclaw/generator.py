@@ -15,13 +15,10 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
     for endpoint in catalog.endpoints:
         query_arg_names = [key.replace("-", "_") for key in endpoint.query_keys]
         body_arg_names = [key.replace("-", "_") for key in endpoint.request_body_keys]
-        method_args = ["self", "*"]
-        # Deduplicate overlapping query/body args to avoid duplicate Python parameter names
         seen: set[str] = set()
-        for name in query_arg_names + body_arg_names:
-            if name not in seen:
-                seen.add(name)
-                method_args.append(f"{name}=None")
+        all_arg_names = [name for name in query_arg_names + body_arg_names if name not in seen and not seen.add(name)]
+        # Only use * if there are keyword-only args; otherwise just self
+        method_args = ["self", "*", *all_arg_names] if all_arg_names else ["self"]
         method_name = _python_method_name(endpoint.name)
         query_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.query_keys]) or ""
         json_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.request_body_keys]) or ""

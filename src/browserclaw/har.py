@@ -66,7 +66,7 @@ def _operation_name(method: str, generalized_path: str) -> str:
 def infer_endpoint_catalog(har_path: str | Path, *, site: str | None = None) -> EndpointCatalog:
     har_payload = load_har(har_path)
     entries = har_payload.get("log", {}).get("entries", [])
-    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str, str], list[dict]] = defaultdict(list)
 
     for entry in entries:
         request = entry.get("request", {})
@@ -76,11 +76,11 @@ def infer_endpoint_catalog(har_path: str | Path, *, site: str | None = None) -> 
         if not _entry_is_api_like(entry):
             continue
         parsed = urlparse(raw_url)
-        key = (request.get("method", "GET").upper(), parsed.netloc, generalize_path(parsed.path or "/"))
+        key = (request.get("method", "GET").upper(), parsed.scheme, parsed.netloc, generalize_path(parsed.path or "/"))
         grouped[key].append(entry)
 
     endpoints: list[EndpointSignature] = []
-    for (method, host, url_template), bucket in sorted(grouped.items()):
+    for (method, scheme, host, url_template), bucket in sorted(grouped.items()):
         query_keys: set[str] = set()
         req_header_keys: set[str] = set()
         req_body_keys: set[str] = set()
@@ -113,7 +113,7 @@ def infer_endpoint_catalog(har_path: str | Path, *, site: str | None = None) -> 
             EndpointSignature(
                 name=_operation_name(method, url_template),
                 method=method,
-                url_template=f"https://{host}{url_template}",
+                url_template=f"{scheme}://{host}{url_template}",
                 host=host,
                 query_keys=sorted(query_keys),
                 request_header_keys=sorted(req_header_keys),
