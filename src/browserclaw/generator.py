@@ -15,29 +15,24 @@ def _python_method_name(name: str) -> str:
 
 
 def _extract_path_params(url_template: str) -> list[str]:
-    # Return unique path param names with index suffixes to avoid duplicates
+    # Return unique path param names with index suffixes to avoid duplicates.
+    # Use positional args in .format() so duplicate placeholders fill in order.
     seen: dict[str, int] = {}
     params = []
     for match in _PATH_PARAM_RE.finditer(url_template):
         key = match.group(1)
         count = seen.get(key, 0)
         seen[key] = count + 1
-        unique_name = f"{key}_{count}" if count > 0 else key
+        # Rename "self" to avoid conflicting with Python's self parameter
+        base = "path_self" if key == "self" else key
+        unique_name = f"{base}_{count}" if count > 0 else base
         params.append(unique_name)
     return params
 
 
 def _format_url(url_template: str, path_params: list[str]) -> str:
-    # Build keyword args for .format() from unique param names
-    seen: dict[str, int] = {}
-    format_args = []
-    for match in _PATH_PARAM_RE.finditer(url_template):
-        key = match.group(1)
-        count = seen.get(key, 0)
-        seen[key] = count + 1
-        unique_name = f"{key}_{count}" if count > 0 else key
-        format_args.append(f"{unique_name}={unique_name}")
-    return f'"{url_template}".format(' + ", ".join(format_args) + ")"
+    # Use positional args so duplicate {id} placeholders fill in left-to-right order
+    return url_template + ".format(" + ", ".join(path_params) + ")"
 
 
 def render_python_client(catalog: EndpointCatalog, *, class_name: str = "BrowserClawClient") -> str:
