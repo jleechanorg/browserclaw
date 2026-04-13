@@ -30,7 +30,7 @@ def generalize_path(path: str) -> str:
         if _looks_variable(part):
             generalized.append("{id}")
         elif part.lower() in {"me", "self"}:
-            generalized.append("{self}")
+            generalized.append("{user}")
         else:
             generalized.append(part)
     return "/" + "/".join(generalized)
