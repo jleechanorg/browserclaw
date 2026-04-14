@@ -6,8 +6,7 @@ build/
 *.pyc
 *.pyo
 *.pyd
+*.har
 *.jsonl
-# HAR fixtures in tests/ are committed for unit test coverage
-!tests/fixtures/*.har
 generated/
 

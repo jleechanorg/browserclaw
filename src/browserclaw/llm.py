@@ -15,10 +15,7 @@ def _extract_json_blob(text: str) -> Any:
         lines = text.splitlines()
         if len(lines) >= 3:
             text = "\n".join(lines[1:-1]).strip()
-    indices = [i for i in (text.find("{"), text.find("[")) if i != -1]
-    if not indices:
-        raise ValueError("No JSON object or array found in LLM response")
-    start = min(indices)
+    start = min(index for index in (text.find("{"), text.find("[")) if index != -1)
     end = max(text.rfind("}"), text.rfind("]"))
     return json.loads(text[start : end + 1])
 

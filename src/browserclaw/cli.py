@@ -87,9 +87,7 @@ def main() -> None:
         catalog = infer_endpoint_catalog(args.har, site=args.site)
         if args.provider and args.model:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
+        Path(args.output).write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
         print(args.output)
         return
 
@@ -118,6 +116,7 @@ def main() -> None:
         if args.provider and args.model:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
         bundle = generate_bundle(catalog, output_dir)
         print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
         return
