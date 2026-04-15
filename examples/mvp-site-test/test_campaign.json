@@ -1,0 +1,42 @@
+{
+  "name": "worldai-mvp-site",
+  "url": "https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/",
+  "site_type": "firebase_spa",
+  "firebase_project": "worldarchitecture-ai",
+  "auth_type": "firebase_auth",
+  "notes": "WorldAI is a D&D campaign management SPA. Data is stored in Firebase Firestore. The only static HTTP endpoints are /api/time and /api/health. All game data flows through Firebase SDK (not captured in standard HAR).",
+  "known_endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/time",
+      "auth_required": false,
+      "description": "Returns server time for clock skew detection"
+    },
+    {
+      "method": "GET", 
+      "path": "/api/health",
+      "auth_required": false,
+      "description": "Health check (serves HTML on this deployment)"
+    }
+  ],
+  "firebase_config": {
+    "authDomain": "worldarchitecture-ai.firebaseapp.com",
+    "projectId": "worldarchitecture-ai",
+    "storageBucket": "worldarchitecture-ai.firebasestorage.app",
+    "messagingSenderId": "754683067800",
+    "appId": "1:754683067800:web:3b38787c69de301c147fed"
+  },
+  "capture_notes": [
+    "Static homepage capture only captures JS/CSS bundles + /api/time",
+    "Firebase Firestore traffic uses WebSocket/streaming not captured in HAR",
+    "Auth is Firebase Auth - browserclaw storage_state only captures cookies, not Firebase tokens",
+    "To discover Firestore endpoints, need to intercept Firebase SDK XHR at runtime or use Firebase Admin SDK"
+  ],
+  "steps": [
+    {
+      "action": "wait_for_timeout",
+      "milliseconds": 8000,
+      "description": "Wait for JS to load and initialize Firebase"
+    }
+  ]
+}

@@ -65,9 +65,13 @@ browserclaw reverse \
 [
   {"action": "click", "selector": "button[aria-label='Search']"},
   {"action": "fill", "selector": "input[name='keywords']", "value": "site reliability"},
-  {"action": "press", "selector": "input[name='keywords']", "value": "Enter"}
+  {"action": "press", "selector": "input[name='keywords']", "value": "Enter"},
+  {"action": "eval", "value": "window.testAuthBypass = {enabled: true}"},
+  {"action": "wait_for_timeout", "milliseconds": 2000}
 ]
 ```
+
+Supported actions: `goto`, `click`, `fill`, `press`, `wait_for_timeout`, `wait_for_url`, `eval`.
 
 Run them with:
 
@@ -79,6 +83,32 @@ browserclaw capture \
 ```
 
 If you provide `--goal` and an LLM provider, `browserclaw` can ask an LLM to produce a step plan using the supported actions. It still does not handle auth or CAPTCHA bypass automatically.
+
+## Authenticated capture
+
+For sites that require authentication headers (e.g., Firebase ID tokens, Bearer tokens):
+
+```bash
+browserclaw capture \
+  --url https://example.com/api \
+  --output capture.har \
+  --headless \
+  --extra-headers Authorization="Bearer $FIREBASE_TOKEN"
+```
+
+This uses Playwright's `extra_http_headers` context option to inject headers into all browser requests. For Firebase-backed SPAs, combine with a Firebase Admin SDK script to mint test tokens:
+
+```python
+import firebase_admin
+from firebase_admin import credentials, auth
+
+cred = credentials.Certificate('service-account.json')
+firebase_admin.initialize_app(cred)
+user = auth.create_custom_token('user-id')  # returns bytes JWT
+print(f"Bearer {user.decode()}")
+```
+
+Note: `--storage-state` only captures HTTP cookies, not Firebase Auth tokens (stored in memory/localStorage). Use `--extra-headers` or `--eval` for Firebase auth bypass.
 
 ## LLM-backed enrichment
 
