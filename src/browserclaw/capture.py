@@ -112,7 +112,8 @@ async def _capture(
         else:
             await page.wait_for_timeout(wait_after_load * 1000)
 
-        await context.close()
+        if not _use_superpower:
+            await context.close()
         await browser.close()
     return output
 
@@ -240,11 +241,13 @@ async def _capture_evidence(
         if sc:
             browser, context, page = sc
             source = "superpower_chrome"
+            _use_superpower = True
         else:
             browser = await p.chromium.launch(channel=browser_channel, headless=headless)
             context = await browser.new_context()
             page = await context.new_page()
             source = "playwright"
+            _use_superpower = False
 
         try:
             await page.goto(url, wait_until="domcontentloaded")
@@ -280,7 +283,8 @@ async def _capture_evidence(
             meta_path.write_text(f"url: {url}\ntitle: {title}\nsource: {source}\n")
 
         finally:
-            await context.close()
+            if not _use_superpower:
+                await context.close()
             await browser.close()
 
     return evidence_dir
