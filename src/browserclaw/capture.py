@@ -121,7 +121,15 @@ def capture_har(
 
 
 class _WsCaptureSession:
-    """CDP WebSocket event collector."""
+    """CDP WebSocket event collector for Playwright 1.x.
+
+    Playwright 1.x uses requestId (not connectionId) as the WS event key.
+    Event shapes differ from CDP spec:
+      - webSocketCreated: {requestId, url, initiator}
+      - webSocketFrameSent/Received: {requestId, timestamp, response: {opcode, payloadData, payloadLength}}
+      - webSocketHandshakeResponseReceived: {requestId, timestamp, response: {headers, status}}
+      - webSocketDestroyed: {requestId, timestamp, reason}
+    """
 
     def __init__(self, cdp):
         self.cdp = cdp
@@ -130,7 +138,6 @@ class _WsCaptureSession:
         self._firestore_calls: list = []
 
     async def enable(self):
-        # Network WebSocket events
         await self.cdp.send("Network.enable")
         self.cdp.on("Network.webSocketCreated", self._on_created)
         self.cdp.on("Network.webSocketFrameSent", self._on_frame_sent)
@@ -139,56 +146,76 @@ class _WsCaptureSession:
         self.cdp.on("Network.webSocketDestroyed", self._on_destroyed)
 
     def _on_created(self, event):
-        self.connections[event["connectionId"]] = WebSocketConnection(
-            connection_id=event["connectionId"],
-            url=event["request"]["url"],
+        # Playwright 1.x: requestId + url (no nested request.url)
+        rid = event["requestId"]
+        ws_url = event.get("url", "")
+        initiator = event.get("initiator", {})
+        req_headers = {}
+        if isinstance(initiator, dict):
+            # Stack trace may contain URL info but not full headers
+            pass
+        self.connections[rid] = WebSocketConnection(
+            connection_id=rid,
+            url=ws_url,
             created_at=time.time(),
-            request_headers=dict(event["request"].get("headers", {})),
+            request_headers=req_headers,
         )
 
     def _on_frame_sent(self, event):
-        conn = self.connections.get(event["connectionId"])
+        rid = event["requestId"]
+        conn = self.connections.get(rid)
         if not conn:
             return
-        payload, is_bin = _decode_ws_payload(event["response"]["payloadData"])
+        response = event.get("response", {})
+        payload_data = response.get("payloadData", "")
+        opcode = response.get("opcode", 0)
+        payload, is_bin = _decode_ws_payload(payload_data)
         frame = WebSocketFrame(
-            timestamp=time.time(),
-            connection_id=event["connectionId"],
+            timestamp=event.get("timestamp", time.time()),
+            connection_id=rid,
             direction="sent",
-            opcode=event["response"]["opcode"],
+            opcode=opcode,
             payload=payload,
-            size=event["response"]["payloadLength"],
+            size=response.get("payloadLength", len(payload_data) if payload_data else 0),
             is_binary=is_bin,
         )
         conn.frames.append(frame)
         self._maybe_parse_firestore(conn, frame)
 
     def _on_frame_received(self, event):
-        conn = self.connections.get(event["connectionId"])
+        rid = event["requestId"]
+        conn = self.connections.get(rid)
         if not conn:
             return
-        payload, is_bin = _decode_ws_payload(event["response"]["payloadData"])
+        response = event.get("response", {})
+        payload_data = response.get("payloadData", "")
+        opcode = response.get("opcode", 0)
+        payload, is_bin = _decode_ws_payload(payload_data)
         frame = WebSocketFrame(
-            timestamp=time.time(),
-            connection_id=event["connectionId"],
+            timestamp=event.get("timestamp", time.time()),
+            connection_id=rid,
             direction="received",
-            opcode=event["response"]["opcode"],
+            opcode=opcode,
             payload=payload,
-            size=event["response"]["payloadLength"],
+            size=response.get("payloadLength", len(payload_data) if payload_data else 0),
             is_binary=is_bin,
         )
         conn.frames.append(frame)
         self._maybe_parse_firestore(conn, frame)
 
     def _on_handshake(self, event):
-        conn = self.connections.get(event["connectionId"])
+        rid = event["requestId"]
+        conn = self.connections.get(rid)
         if conn:
-            conn.response_headers = dict(event["response"]["headers"])
+            response = event.get("response", {})
+            headers = response.get("headers", {})
+            conn.response_headers = dict(headers)
 
     def _on_destroyed(self, event):
-        conn = self.connections.get(event["connectionId"])
+        rid = event["requestId"]
+        conn = self.connections.get(rid)
         if conn:
-            conn.closed_at = time.time()
+            conn.closed_at = event.get("timestamp", time.time())
 
     def _maybe_parse_firestore(self, conn: WebSocketConnection, frame: WebSocketFrame):
         """If this is a Firestore connection, parse the frame for RPC calls."""
