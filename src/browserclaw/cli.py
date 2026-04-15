@@ -66,6 +66,8 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_parser = subparsers.add_parser("generate")
     generate_parser.add_argument("--catalog", required=True)
     generate_parser.add_argument("--output-dir", required=True)
+    generate_parser.add_argument("--save-skill", action="store_true", help="Also generate SKILL.md")
+    generate_parser.add_argument("--skill-name", help="Skill name override (default: auto from URL)")
 
     # ── Generate from WebSocket capture ───────────────────────────────────────
     generate_ws_parser = subparsers.add_parser("generate-ws", help="Generate WebSocket replay scripts from capture")
@@ -93,6 +95,28 @@ def _build_parser() -> argparse.ArgumentParser:
     reverse_parser.add_argument("--site")
     reverse_parser.add_argument("--capture-ws", action="store_true", help="Also capture WebSocket frames")
     reverse_parser.add_argument("--ws-output-dir", default=None, help="Output dir for WS capture (default: <output-dir>/ws)")
+    reverse_parser.add_argument("--save-skill", action="store_true", help="Also generate SKILL.md")
+
+    # ── Learn (capture + infer + generate + skill) ──────────────────────────────
+    learn_parser = subparsers.add_parser("learn", help="Capture, infer, generate client code AND save a SKILL.md")
+    learn_parser.add_argument("--url", required=True)
+    learn_parser.add_argument("--output-dir", required=True)
+    learn_parser.add_argument("--browser-channel", default="chromium")
+    learn_parser.add_argument("--storage-state")
+    learn_parser.add_argument(
+        "--extra-headers",
+        nargs="*",
+        help="Extra HTTP headers as KEY=VALUE pairs",
+    )
+    learn_parser.add_argument("--headless", action="store_true")
+    learn_parser.add_argument("--manual", action="store_true")
+    learn_parser.add_argument("--wait-after-load", type=float, default=15.0)
+    learn_parser.add_argument("--steps")
+    learn_parser.add_argument("--goal")
+    learn_parser.add_argument("--provider", choices=["anthropic", "openai", "gemini"])
+    learn_parser.add_argument("--model")
+    learn_parser.add_argument("--site")
+    learn_parser.add_argument("--skill-name", help="Skill name (default: auto from URL)")
 
     return parser
 
@@ -165,12 +189,39 @@ def main() -> None:
 
     if args.command == "generate":
         catalog = EndpointCatalog.from_dict(json.loads(Path(args.catalog).read_text()))
-        bundle = generate_bundle(catalog, args.output_dir)
+        bundle = generate_bundle(catalog, args.output_dir, site_url=getattr(args, 'site', None) or catalog.site)
         print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
         return
 
     if args.command == "generate-ws":
         bundle = generate_ws_bundle(args.ws_capture, args.output_dir)
+        print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
+        return
+
+    if args.command == "learn":
+        output_dir = Path(args.output_dir)
+        har_path = output_dir / "capture.har"
+        catalog_path = output_dir / "catalog.json"
+        steps = _resolve_steps(args)
+        manual = False if args.headless else (args.manual or steps is None)
+        capture_har(
+            args.url,
+            har_path,
+            browser_channel=args.browser_channel,
+            headless=args.headless,
+            storage_state=args.storage_state,
+            manual=manual,
+            wait_after_load=args.wait_after_load,
+            steps=steps,
+            extra_headers=_parse_extra_headers(args.extra_headers),
+        )
+        catalog = infer_endpoint_catalog(har_path, site=args.site)
+        if args.provider and args.model:
+            catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
+        bundle = generate_bundle(catalog, output_dir, site_url=args.url)
+
         print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
         return
 
@@ -196,7 +247,7 @@ def main() -> None:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
         catalog_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
-        bundle = generate_bundle(catalog, output_dir)
+        bundle = generate_bundle(catalog, output_dir, site_url=args.url if getattr(args, 'save_skill', False) else None)
 
         # Optional: also capture WebSocket frames
         if args.capture_ws:
