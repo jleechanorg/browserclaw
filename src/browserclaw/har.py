@@ -19,6 +19,53 @@ def load_har(path: str | Path) -> dict:
     return json.loads(Path(path).read_text())
 
 
+def build_catalog_from_responses(site: str, responses: dict[str, dict]) -> EndpointCatalog:
+    """Build a minimal EndpointCatalog from superpower chrome fetchApi responses.
+
+    This is used when HAR capture fails (e.g., when using superpower chrome
+    which doesn't produce a local HAR file).
+    """
+    from .models import EndpointCatalog as EC, EndpointSignature as ES  # local import to avoid circular
+
+    endpoints = []
+    for path, resp in responses.items():
+        method = "GET"
+        # Determine status/content-type from response if available
+        status_codes = []
+        content_types = []
+        if isinstance(resp, dict):
+            if "status" in resp:
+                status_codes = [resp["status"]]
+            if "data" in resp:
+                data = resp["data"]
+                if isinstance(data, dict):
+                    # Try to infer content type
+                    if "campaigns" in data or "campaign_id" in data:
+                        content_types = ["application/json"]
+        endpoints.append(
+            ES(
+                name=path.replace("/", "_").strip("_") or "root",
+                method=method,
+                url_template=f"https://{site}{path}",
+                host=site,
+                query_keys=[],
+                request_header_keys=[],
+                request_body_keys=[],
+                response_header_keys=[],
+                sample_status_codes=status_codes,
+                sample_content_types=content_types,
+                description=f"Captured via superpower chrome fetchApi",
+            )
+        )
+
+    return EC(
+        site=site,
+        source_har=None,
+        notes=["Catalog built from superpower chrome fetchApi responses (no HAR)"],
+        endpoints=endpoints,
+    )
+
+
 def _looks_variable(segment: str) -> bool:
     return bool(_NUMBER_RE.match(segment) or _UUID_RE.match(segment) or _HEXISH_RE.match(segment))
 

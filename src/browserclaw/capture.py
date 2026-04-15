@@ -42,6 +42,19 @@ def load_steps(path: str | Path) -> list:
     return payload
 
 
+async def _connect_superpower_chrome(playwright):
+    """Try to connect to superpower chrome at localhost:9222. Returns (browser, context, page) or None."""
+    try:
+        browser = await playwright.chromium.connect_over_cdp("http://localhost:9222")
+        context = browser.contexts[0]
+        page = context.pages[-1]
+        # Verify it's alive with a quick eval
+        await page.evaluate("1 + 1")
+        return browser, context, page
+    except Exception:
+        return None
+
+
 async def _capture(
     url: str,
     output: Path,
@@ -55,20 +68,36 @@ async def _capture(
     extra_headers: dict[str, str] | None = None,
 ) -> Path:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(channel=browser_channel, headless=headless)
-        context_options: dict = {
-            "record_har_path": str(output),
-            "record_har_mode": "full",
-            "record_har_content": "embed",
-        }
-        if storage_state:
-            context_options["storage_state"] = storage_state
-        if extra_headers:
-            context_options["extra_http_headers"] = extra_headers
-        context: BrowserContext = await browser.new_context(**context_options)
-        page = await context.new_page()
-        cdp = await context.new_cdp_session(page)
-        await cdp.send("Network.enable")
+        # Try superpower chrome first (has auth already attached)
+        sc = await _connect_superpower_chrome(playwright)
+        if sc:
+            browser, context, page = sc
+            _use_superpower = True
+        else:
+            browser = await playwright.chromium.launch(
+                channel=browser_channel,
+                headless=headless,
+                args=["--disable-font-subpixel-positioning", "--disable-gpu"],
+            )
+            context_options: dict = {
+                "record_har_path": str(output),
+                "record_har_mode": "full",
+                "record_har_content": "embed",
+            }
+            if storage_state:
+                context_options["storage_state"] = storage_state
+            if extra_headers:
+                context_options["extra_http_headers"] = extra_headers
+            context = await browser.new_context(**context_options)
+            page = await context.new_page()
+            _use_superpower = False
+
+        # Only enable HAR recording when NOT using superpower chrome
+        # (superpower chrome's CDP already captures network via its own proxy)
+        if not _use_superpower:
+            cdp = await context.new_cdp_session(page)
+            await cdp.send("Network.enable")
+
         await page.goto(url, wait_until="domcontentloaded")
 
         if steps:
@@ -115,6 +144,157 @@ def capture_har(
             extra_headers=extra_headers,
         )
     )
+
+
+# ─── Superpower Chrome: response capture ───────────────────────────────────────
+
+
+async def _capture_responses_superpower(url: str) -> dict[str, dict]:
+    """Use superpower chrome's fetchApi to capture authenticated response bodies.
+
+    Returns a dict mapping endpoint path -> {status, data, headers}.
+    Empty dict if superpower chrome is not available.
+    """
+    result: dict[str, dict] = {}
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+        except Exception:
+            return result
+
+        try:
+            context = browser.contexts[0]
+            page = context.pages[-1]
+
+            # Verify fetchApi is available
+            is_fn = await page.evaluate("typeof window.fetchApi === 'function'")
+            if not is_fn:
+                return result
+
+            base = url.rstrip("/")
+            endpoints = [
+                ("/api/campaigns", "GET", None),
+                ("/api/settings", "GET", None),
+                ("/api/time", "GET", None),
+            ]
+
+            for path, method, body in endpoints:
+                try:
+                    js = f"""async () => {{
+                        const r = await window.fetchApi('{path}');
+                        return {{ status: r.status, data: r.data, headers: {{}} }};
+                    }}"""
+                    resp = await page.evaluate(js)
+                    result[path] = resp
+                except Exception:
+                    pass
+
+            # Try first campaign's story + details if campaigns are accessible
+            try:
+                campaigns_resp = result.get("/api/campaigns")
+                if campaigns_resp and campaigns_resp.get("data", {}).get("campaigns"):
+                    first = campaigns_resp["data"]["campaigns"][0]
+                    cid = first.get("id", "")
+                    if cid:
+                        story_resp = await page.evaluate(
+                            f"""async () => {{
+                                const r = await window.fetchApi('/api/campaigns/{cid}/story');
+                                return {{ status: r.status, data: r.data }};
+                            }}"""
+                        )
+                        result[f"/api/campaigns/{cid}/story"] = story_resp
+            except Exception:
+                pass
+
+        finally:
+            await browser.close()
+
+    return result
+
+
+def capture_responses_superpower(url: str) -> dict[str, dict]:
+    """Synchronous wrapper for _capture_responses_superpower."""
+    return asyncio.run(_capture_responses_superpower(url))
+
+
+# ─── Evidence capture (screenshots + console) ─────────────────────────────────
+
+
+async def _capture_evidence(
+    url: str,
+    output_dir: Path,
+    *,
+    browser_channel: str,
+    headless: bool,
+) -> Path:
+    """Take a screenshot and capture console messages using Playwright.
+
+    Saves evidence/ subdirectory under output_dir with screenshot and console log.
+    Returns Path to the evidence directory.
+    """
+    evidence_dir = output_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    async with async_playwright() as p:
+        sc = await _connect_superpower_chrome(p)
+        if sc:
+            browser, context, page = sc
+            source = "superpower_chrome"
+        else:
+            browser = await p.chromium.launch(channel=browser_channel, headless=headless)
+            context = await browser.new_context()
+            page = await context.new_page()
+            source = "playwright"
+
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
+
+            # Screenshot (non-fatal — fonts may hang in headless)
+            try:
+                screenshot_path = evidence_dir / "screenshot.png"
+                await page.screenshot(path=str(screenshot_path), timeout=5000)
+            except Exception:
+                pass  # fonts/loading issues in headless — skip screenshot
+
+            # Console messages
+            console_entries: list[str] = []
+
+            def on_console(msg):
+                console_entries.append(f"[{msg.type}] {msg.text}")
+
+            page.on("console", on_console)
+            await page.wait_for_timeout(500)
+            page.remove_listener("console", on_console)
+
+            console_path = evidence_dir / "console.txt"
+            console_path.write_text(
+                f"# Browser console log (source: {source})\n"
+                f"# URL: {url}\n"
+                + "\n".join(console_entries)
+            )
+
+            # Also save page title + URL metadata
+            meta_path = evidence_dir / "meta.txt"
+            title = await page.title()
+            meta_path.write_text(f"url: {url}\ntitle: {title}\nsource: {source}\n")
+
+        finally:
+            await context.close()
+            await browser.close()
+
+    return evidence_dir
+
+
+def capture_evidence(
+    url: str,
+    output_dir: str | Path,
+    *,
+    browser_channel: str = "chromium",
+    headless: bool = True,
+) -> Path:
+    """Synchronous wrapper for _capture_evidence."""
+    return asyncio.run(_capture_evidence(url, Path(output_dir), browser_channel=browser_channel, headless=headless))
 
 
 # ─── WebSocket Capture ─────────────────────────────────────────────────────────
