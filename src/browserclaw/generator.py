@@ -54,7 +54,13 @@ def _detect_auth(catalog: EndpointCatalog) -> str:
     return "Unknown — capture may reveal auth mechanism"
 
 
-def render_site_skill(catalog: EndpointCatalog, site_url: str, output_dir: str | Path) -> Path:
+def render_site_skill(
+    catalog: EndpointCatalog,
+    site_url: str,
+    output_dir: str | Path,
+    *,
+    response_shapes: dict[str, dict] | None = None,
+) -> Path:
     """Render a SKILL.md from an EndpointCatalog.
 
     Creates a self-contained skill file that captures:
@@ -84,12 +90,33 @@ def render_site_skill(catalog: EndpointCatalog, site_url: str, output_dir: str |
 
     endpoint_table = "\n".join(endpoint_rows) if endpoint_rows else "| GET | `/` | (no endpoints captured) | |"
 
-    # Build response shapes from first endpoint's sample
-    response_shapes = []
+    # Build response shapes — prefer real captured data, fall back to placeholder
+    shape_entries = []
+    captured = response_shapes or {}
     for e in catalog.endpoints[:6]:
-        if e.sample_content_types:
-            response_shapes.append(f"**{e.method.upper()} {e.url_template}**\n```json\n// Response: {e.sample_content_types[0]}\n// TODO: paste captured response shape\n```\n")
-    response_section = "\n".join(response_shapes) if response_shapes else "*(no response samples captured yet)*"
+        method = e.method.upper()
+        path = e.url_template
+        # Try to find a matching captured response
+        shape = None
+        for captured_path, captured_data in captured.items():
+            if captured_path in path or path in captured_path:
+                shape = captured_data
+                break
+        if shape:
+            data = shape.get("data")
+            if data is not None:
+                import json as _json
+                shape_str = _json.dumps(data, indent=2)
+                # Truncate very large responses
+                if len(shape_str) > 2000:
+                    shape_str = shape_str[:2000] + "\n    ... (truncated)"
+                shape_entries.append(f"**{method} {path}**\n```json\n{shape_str}\n```\n")
+            else:
+                shape_entries.append(f"**{method} {path}**\n```json\n// Response: (empty)\n```\n")
+        else:
+            ctype = e.sample_content_types[0] if e.sample_content_types else "application/json"
+            shape_entries.append(f"**{method} {path}**\n```json\n// Response: {ctype}\n// TODO: run with superpower chrome to capture\n```\n")
+    response_section = "\n".join(shape_entries) if shape_entries else "*(no response samples captured yet)*"
 
     skill_md = f"""---
 name: {skill_name}
@@ -278,7 +305,13 @@ def render_mcp_tools(catalog: EndpointCatalog) -> dict:
     }
 
 
-def generate_bundle(catalog: EndpointCatalog, output_dir: str | Path, *, site_url: str | None = None) -> dict[str, Path]:
+def generate_bundle(
+    catalog: EndpointCatalog,
+    output_dir: str | Path,
+    *,
+    site_url: str | None = None,
+    response_shapes: dict[str, dict] | None = None,
+) -> dict[str, Path]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     catalog_path = output / "catalog.json"
@@ -295,7 +328,7 @@ def generate_bundle(catalog: EndpointCatalog, output_dir: str | Path, *, site_ur
     }
 
     if site_url:
-        skill_path = render_site_skill(catalog, site_url, output)
+        skill_path = render_site_skill(catalog, site_url, output, response_shapes=response_shapes)
         bundle["skill"] = skill_path
 
     return bundle

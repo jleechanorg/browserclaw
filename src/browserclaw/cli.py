@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
-from .capture import capture_har, capture_ws, load_steps
-from .generator import generate_bundle, generate_ws_bundle
-from .har import infer_endpoint_catalog
+from .capture import (
+    capture_har,
+    capture_ws,
+    capture_evidence,
+    capture_responses_superpower,
+    load_steps,
+)
+from .generator import _slug_from_url, generate_bundle, generate_ws_bundle
+from .har import build_catalog_from_responses, infer_endpoint_catalog
 from .llm import enrich_catalog, plan_steps
 from .models import EndpointCatalog
 
@@ -117,6 +124,16 @@ def _build_parser() -> argparse.ArgumentParser:
     learn_parser.add_argument("--model")
     learn_parser.add_argument("--site")
     learn_parser.add_argument("--skill-name", help="Skill name (default: auto from URL)")
+    learn_parser.add_argument(
+        "--deploy-skill",
+        action="store_true",
+        help="Also copy generated SKILL.md to ~/.claude/skills/<slug>/SKILL.md",
+    )
+    learn_parser.add_argument(
+        "--capture-evidence",
+        action="store_true",
+        help="Also capture screenshot and console logs to evidence/ subdirectory",
+    )
 
     return parser
 
@@ -159,7 +176,10 @@ def main() -> None:
             steps=steps,
             extra_headers=_parse_extra_headers(args.extra_headers),
         )
-        print(path)
+        if path.exists():
+            print(path)
+        else:
+            print(f"# No HAR captured (superpower chrome detected at localhost:9222)")
         return
 
     if args.command == "capture-ws":
@@ -204,6 +224,8 @@ def main() -> None:
         catalog_path = output_dir / "catalog.json"
         steps = _resolve_steps(args)
         manual = False if args.headless else (args.manual or steps is None)
+
+        # HAR capture
         capture_har(
             args.url,
             har_path,
@@ -215,12 +237,66 @@ def main() -> None:
             steps=steps,
             extra_headers=_parse_extra_headers(args.extra_headers),
         )
-        catalog = infer_endpoint_catalog(har_path, site=args.site)
+
+        # Superpower chrome response capture (fills in response shapes HAR missed)
+        response_shapes: dict[str, dict] = {}
+        try:
+            response_shapes = capture_responses_superpower(args.url)
+        except Exception:
+            pass
+
+        # Build catalog — from HAR if available, otherwise from superpower chrome responses
+        if har_path.exists():
+            catalog = infer_endpoint_catalog(har_path, site=args.site)
+        elif response_shapes:
+            site = args.site or args.url.split("//")[1].split("/")[0]
+            catalog = build_catalog_from_responses(site, response_shapes)
+        else:
+            # Empty catalog
+            catalog = EndpointCatalog(
+                site=args.site or args.url,
+                source_har=None,
+                notes=["No HAR and no superpower chrome responses captured"],
+                endpoints=[],
+            )
         if args.provider and args.model:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
         catalog_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
-        bundle = generate_bundle(catalog, output_dir, site_url=args.url)
+        bundle = generate_bundle(catalog, output_dir, site_url=args.url, response_shapes=response_shapes)
+
+        # Evidence capture (screenshot + console)
+        if getattr(args, "capture_evidence", False):
+            try:
+                evidence_dir = capture_evidence(
+                    args.url,
+                    output_dir,
+                    browser_channel=args.browser_channel,
+                    headless=args.headless,
+                )
+                bundle["evidence"] = str(evidence_dir)
+            except Exception:
+                pass
+
+        # Deploy skill to ~/.claude/skills/<slug>/SKILL.md AND browserclaw repo skills/ dir
+        if getattr(args, "deploy_skill", False):
+            skill_path = bundle.get("skill")
+            if skill_path:
+                slug = _slug_from_url(args.url)
+
+                # 1. User's local skills dir (for immediate agent use)
+                skills_home = Path.home() / ".claude" / "skills" / slug
+                skills_home.mkdir(parents=True, exist_ok=True)
+                dest_home = skills_home / "SKILL.md"
+                shutil.copy2(skill_path, dest_home)
+                bundle["deployed_skill"] = str(dest_home)
+
+                # 2. browserclaw repo skills/ dir (for version control)
+                repo_skills = Path(__file__).parent.parent.parent / "skills" / slug
+                repo_skills.mkdir(parents=True, exist_ok=True)
+                dest_repo = repo_skills / "SKILL.md"
+                shutil.copy2(skill_path, dest_repo)
+                bundle["repo_skill"] = str(dest_repo)
 
         print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
         return
@@ -242,7 +318,30 @@ def main() -> None:
             steps=steps,
             extra_headers=_parse_extra_headers(args.extra_headers),
         )
-        catalog = infer_endpoint_catalog(har_path, site=args.site)
+        
+        # Build catalog — from HAR if available, otherwise from superpower chrome responses
+        if har_path.exists():
+            catalog = infer_endpoint_catalog(har_path, site=args.site)
+        else:
+            # Try superpower chrome response capture as fallback
+            response_shapes: dict[str, dict] = {}
+            try:
+                response_shapes = capture_responses_superpower(args.url)
+            except Exception:
+                pass
+            
+            if response_shapes:
+                site = args.site or args.url.split("//")[1].split("/")[0]
+                catalog = build_catalog_from_responses(site, response_shapes)
+            else:
+                # Empty catalog
+                catalog = EndpointCatalog(
+                    site=args.site or args.url,
+                    source_har=None,
+                    notes=["No HAR and no superpower chrome responses captured"],
+                    endpoints=[],
+                )
+        
         if args.provider and args.model:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
