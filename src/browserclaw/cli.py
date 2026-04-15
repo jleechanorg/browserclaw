@@ -176,7 +176,10 @@ def main() -> None:
             steps=steps,
             extra_headers=_parse_extra_headers(args.extra_headers),
         )
-        print(path)
+        if path.exists():
+            print(path)
+        else:
+            print(f"# No HAR captured (superpower chrome detected at localhost:9222)")
         return
 
     if args.command == "capture-ws":
@@ -315,7 +318,30 @@ def main() -> None:
             steps=steps,
             extra_headers=_parse_extra_headers(args.extra_headers),
         )
-        catalog = infer_endpoint_catalog(har_path, site=args.site)
+        
+        # Build catalog — from HAR if available, otherwise from superpower chrome responses
+        if har_path.exists():
+            catalog = infer_endpoint_catalog(har_path, site=args.site)
+        else:
+            # Try superpower chrome response capture as fallback
+            response_shapes: dict[str, dict] = {}
+            try:
+                response_shapes = capture_responses_superpower(args.url)
+            except Exception:
+                pass
+            
+            if response_shapes:
+                site = args.site or args.url.split("//")[1].split("/")[0]
+                catalog = build_catalog_from_responses(site, response_shapes)
+            else:
+                # Empty catalog
+                catalog = EndpointCatalog(
+                    site=args.site or args.url,
+                    source_har=None,
+                    notes=["No HAR and no superpower chrome responses captured"],
+                    endpoints=[],
+                )
+        
         if args.provider and args.model:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
