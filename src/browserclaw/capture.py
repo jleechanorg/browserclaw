@@ -204,6 +204,27 @@ async def _capture_responses_superpower(url: str) -> dict[str, dict]:
                             }}"""
                         )
                         result[f"/api/campaigns/{cid}/story"] = story_resp
+
+                        # Try export endpoint (may return non-JSON — use native fetch)
+                        try:
+                            export_resp = await page.evaluate(
+                                f"""async () => {{
+                                    const r = await fetch('/api/campaigns/{cid}/export', {{
+                                        method: 'GET',
+                                        credentials: 'include'
+                                    }});
+                                    const text = await r.text();
+                                    return {{
+                                        status: r.status,
+                                        contentType: r.headers.get('content-type'),
+                                        body: text.slice(0, 500),
+                                        isRateLimited: r.status === 429
+                                    }};
+                                }}"""
+                            )
+                            result[f"/api/campaigns/{cid}/export"] = export_resp
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
