@@ -376,7 +376,7 @@ class _WsCaptureSession:
         opcode = response.get("opcode", 0)
         payload, is_bin = _decode_ws_payload(payload_data)
         frame = WebSocketFrame(
-            timestamp=event.get("timestamp", time.time()),
+            timestamp=time.time(),
             connection_id=rid,
             direction="sent",
             opcode=opcode,
@@ -397,7 +397,7 @@ class _WsCaptureSession:
         opcode = response.get("opcode", 0)
         payload, is_bin = _decode_ws_payload(payload_data)
         frame = WebSocketFrame(
-            timestamp=event.get("timestamp", time.time()),
+            timestamp=time.time(),
             connection_id=rid,
             direction="received",
             opcode=opcode,
@@ -420,7 +420,7 @@ class _WsCaptureSession:
         rid = event["requestId"]
         conn = self.connections.get(rid)
         if conn:
-            conn.closed_at = event.get("timestamp", time.time())
+            conn.closed_at = time.time()
 
     def _maybe_parse_firestore(self, conn: WebSocketConnection, frame: WebSocketFrame):
         """If this is a Firestore connection, parse the frame for RPC calls."""

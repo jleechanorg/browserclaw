@@ -12,6 +12,8 @@ from browserclaw.generator import (
     _python_method_name,
     _python_arg_name,
     _extract_path_params,
+    _unique_arg_names,
+    _auto_tags,
 )
 from browserclaw.har import infer_endpoint_catalog
 from browserclaw.models import EndpointSignature, EndpointCatalog
@@ -130,3 +132,57 @@ def test_generated_client_json_endpoint_uses_json() -> None:
     catalog = EndpointCatalog(site="example", source_har="test.har", notes=[], endpoints=[ep])
     rendered = render_python_client(catalog)
     assert "json=payload or None" in rendered
+
+
+def test_unique_arg_names_collision_suffix() -> None:
+    """Keys that sanitize to the same name must get unique suffixes."""
+    result = _unique_arg_names(["a.b", "a-b", "a_b"])
+    names = [sanitized for _, sanitized in result]
+    assert len(names) == 3
+    assert len(set(names)) == 3
+    assert names[0] == "a_b"
+    assert names[1] == "a_b_1"
+    assert names[2] == "a_b_2"
+
+
+def test_unique_arg_names_excludes_path_params() -> None:
+    """Keys colliding with path params must be excluded."""
+    result = _unique_arg_names(["id", "query"], exclude={"id"})
+    assert len(result) == 1
+    assert result[0] == ("query", "query")
+
+
+def test_generated_client_follow_redirects() -> None:
+    """Generated httpx.Client must set follow_redirects=True."""
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[])
+    rendered = render_python_client(catalog)
+    assert "follow_redirects=True" in rendered
+
+
+def test_auto_tags_detects_jwt_from_authorization_header() -> None:
+    """JWT tag must trigger on Authorization header, not on literal 'jwt' key."""
+    ep = EndpointSignature(
+        name="get_data",
+        method="GET",
+        url_template="https://example.com/data",
+        host="example.com",
+        request_header_keys=["Authorization"],
+        description="",
+    )
+    catalog = EndpointCatalog(site="example.com", source_har="t.har", notes=[], endpoints=[ep])
+    tags = _auto_tags(catalog)
+    assert "jwt" in tags
+
+
+def test_generate_bundle_no_skill_without_site_url(tmp_path: Path) -> None:
+    """generate_bundle must not create SKILL.md when site_url is None."""
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[])
+    bundle = generate_bundle(catalog, tmp_path, site_url=None)
+    assert "skill" not in bundle
+
+
+def test_generate_bundle_creates_skill_with_site_url(tmp_path: Path) -> None:
+    """generate_bundle must create SKILL.md when site_url is provided."""
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[])
+    bundle = generate_bundle(catalog, tmp_path, site_url="https://example.com")
+    assert "skill" in bundle
