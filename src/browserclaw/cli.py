@@ -73,6 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
     generate_parser = subparsers.add_parser("generate")
     generate_parser.add_argument("--catalog", required=True)
     generate_parser.add_argument("--output-dir", required=True)
+    generate_parser.add_argument("--url", help="Site URL (required with --save-skill for SKILL.md generation)")
     generate_parser.add_argument("--save-skill", action="store_true", help="Also generate SKILL.md")
     generate_parser.add_argument("--skill-name", help="Skill name override (default: auto from URL)")
 
@@ -208,8 +209,11 @@ def main() -> None:
         return
 
     if args.command == "generate":
+        if getattr(args, 'save_skill', False) and not args.url:
+            parser.error("--save-skill requires --url")
         catalog = EndpointCatalog.from_dict(json.loads(Path(args.catalog).read_text()))
-        bundle = generate_bundle(catalog, args.output_dir, site_url=getattr(args, 'site', None) or catalog.site)
+        site_url = args.url if getattr(args, 'save_skill', False) else None
+        bundle = generate_bundle(catalog, args.output_dir, site_url=site_url)
         print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
         return
 

@@ -28,6 +28,8 @@ class EndpointSignature:
     response_header_keys: list[str] = field(default_factory=list)
     sample_status_codes: list[int] = field(default_factory=list)
     sample_content_types: list[str] = field(default_factory=list)
+    request_content_type: str = "json"  # "json" or "form" — primary encoding
+    observed_request_content_types: list[str] = field(default_factory=list)
     description: str = ""
 
     def to_dict(self) -> dict[str, Any]:

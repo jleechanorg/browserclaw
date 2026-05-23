@@ -91,10 +91,26 @@ def _entry_is_api_like(entry: dict) -> bool:
     content_type = response_headers.get("content-type", "")
     accept = request_headers.get("accept", "")
     mime_type = entry.get("response", {}).get("content", {}).get("mimeType", "")
-    return any(
-        hint in (content_type + " " + accept + " " + mime_type).lower()
-        for hint in ("json", "graphql", "protobuf", "x-www-form-urlencoded")
-    )
+    combined = (content_type + " " + accept + " " + mime_type).lower()
+
+    # Standard API detection
+    if any(hint in combined for hint in ("json", "graphql", "protobuf", "x-www-form-urlencoded")):
+        return True
+
+    # XHR responses returning JSON body with text/html Content-Type (common
+    # with legacy ASP/classic backends like catertrax).
+    if "xmlhttprequest" in request_headers.get("x-requested-with", "").lower():
+        body = entry.get("response", {}).get("content", {}).get("text", "")
+        if body and body.lstrip().startswith(("{", "[")):
+            return True
+
+    # Accept: application/... with JSON-shaped body
+    if accept.startswith("application/"):
+        body = entry.get("response", {}).get("content", {}).get("text", "")
+        if body and body.lstrip().startswith(("{", "[")):
+            return True
+
+    return False
 
 
 def _operation_name(method: str, generalized_path: str) -> str:
@@ -134,6 +150,8 @@ def infer_endpoint_catalog(har_path: str | Path, *, site: str | None = None) -> 
         resp_header_keys: set[str] = set()
         sample_status_codes: set[int] = set()
         sample_content_types: set[str] = set()
+        is_form_endpoint = False
+        seen_content_types: set[str] = set()
         for entry in bucket:
             request = entry.get("request", {})
             response = entry.get("response", {})
@@ -149,7 +167,23 @@ def infer_endpoint_catalog(har_path: str | Path, *, site: str | None = None) -> 
                         sample_content_types.add(header["value"])
             sample_status_codes.add(int(response.get("status", 0)))
             post_data = request.get("postData", {})
-            if post_data.get("mimeType", "").startswith("application/json") and post_data.get("text"):
+            mime = post_data.get("mimeType", "")
+            is_form = "x-www-form-urlencoded" in mime
+
+            if is_form:
+                is_form_endpoint = True
+                seen_content_types.add("form")
+                form_params = post_data.get("params")
+                if form_params and isinstance(form_params, list):
+                    for param in form_params:
+                        name = param.get("name", "")
+                        if name:
+                            req_body_keys.add(name)
+                elif post_data.get("text"):
+                    for key, _ in parse_qsl(post_data["text"], keep_blank_values=True):
+                        req_body_keys.add(key)
+            elif mime.startswith("application/json") and post_data.get("text"):
+                seen_content_types.add("json")
                 try:
                     payload = json.loads(post_data["text"])
                 except json.JSONDecodeError:
@@ -168,6 +202,8 @@ def infer_endpoint_catalog(har_path: str | Path, *, site: str | None = None) -> 
                 response_header_keys=sorted(resp_header_keys),
                 sample_status_codes=sorted(code for code in sample_status_codes if code),
                 sample_content_types=sorted(sample_content_types),
+                request_content_type="form" if is_form_endpoint else "json",
+                observed_request_content_types=sorted(seen_content_types) if seen_content_types else ["json"],
                 description=f"Inferred from {len(bucket)} captured requests.",
             )
         )

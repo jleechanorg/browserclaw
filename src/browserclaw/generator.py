@@ -34,7 +34,7 @@ def _auto_tags(catalog: EndpointCatalog) -> list[str]:
         tags.append("campaign")
     if any("json" in (ct or "") for e in catalog.endpoints for ct in e.sample_content_types):
         tags.append("json")
-    if any("jwt" in (h.lower() for e in catalog.endpoints for h in e.request_header_keys) for _ in [1]):
+    if any("jwt" in h.lower() or "authorization" in h.lower() for e in catalog.endpoints for h in e.request_header_keys):
         tags.append("jwt")
     return tags
 
@@ -203,7 +203,27 @@ _PATH_PARAM_RE = re.compile(r"\{(\w+)\}")
 
 
 def _python_method_name(name: str) -> str:
-    return name.replace("-", "_")
+    """Sanitize a name into a valid Python method identifier.
+
+    Replaces any non-word characters with underscores and prefixes with
+    an underscore if the result would start with a digit.
+    """
+    safe = re.sub(r"\W", "_", name)
+    if safe and safe[0].isdigit():
+        safe = "_" + safe
+    return safe
+
+
+def _python_arg_name(key: str) -> str:
+    """Sanitize a query/body key into a valid Python argument name.
+
+    Dotted keys like ``cb.gsLastRender`` become ``cb_gsLastRender``.
+    Keys starting with digits get a ``_`` prefix.
+    """
+    safe = re.sub(r"\W", "_", key)
+    if safe and safe[0].isdigit():
+        safe = "_" + safe
+    return safe
 
 
 def _extract_path_params(url_template: str) -> list[str]:
@@ -223,63 +243,145 @@ def _extract_path_params(url_template: str) -> list[str]:
 
 
 def _format_url(url_template: str, path_params: list[str]) -> str:
-    # Use positional args so duplicate {id} placeholders fill in left-to-right order
-    return f'"{url_template}".format(' + ", ".join(path_params) + ")"
+    # Renumber named placeholders ({id}, {self}, etc.) to positional ({0}, {1}, …)
+    # so that .format(*args) works. Named placeholders require keyword args,
+    # which we don't want in generated code.
+    positional_template = url_template
+    for i, match in enumerate(_PATH_PARAM_RE.finditer(url_template)):
+        positional_template = positional_template.replace(match.group(0), "{" + str(i) + "}", 1)
+    return f'"{positional_template}".format(' + ", ".join(path_params) + ")"
+
+
+def _build_arg_map(
+    query_keys: list[str], body_keys: list[str], exclude: set[str] | None = None
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Build (original_key, sanitized_name) pairs for query and body separately.
+
+    A key appearing in both query and body gets two distinct Python args
+    (e.g. ``id`` and ``id_body``) so the caller can supply different values.
+    """
+    exclude = exclude or set()
+    seen: dict[str, int] = {}
+    query_args: list[tuple[str, str]] = []
+    body_args: list[tuple[str, str]] = []
+
+    for key in query_keys:
+        base = _python_arg_name(key)
+        if base in exclude:
+            continue
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        unique = f"{base}_{count}" if count > 0 else base
+        query_args.append((key, unique))
+
+    for key in body_keys:
+        base = _python_arg_name(key)
+        if base in exclude:
+            continue
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        unique = f"{base}_{count}" if count > 0 else base
+        body_args.append((key, unique))
+
+    return query_args, body_args
 
 
 def render_python_client(catalog: EndpointCatalog, *, class_name: str = "BrowserClawClient") -> str:
     methods: list[str] = []
     for endpoint in catalog.endpoints:
         path_param_names = _extract_path_params(endpoint.url_template)
-        query_arg_names = [key.replace("-", "_") for key in endpoint.query_keys]
-        body_arg_names = [key.replace("-", "_") for key in endpoint.request_body_keys]
-        # Deduplicate query/body args, excluding any that collide with path params
         path_set = set(path_param_names)
-        seen: set[str] = set()
-        all_arg_names = [
-            name for name in query_arg_names + body_arg_names
-            if name not in path_set and name not in seen and not seen.add(name)
-        ]
-        # Path params are positional, query/body params are keyword-only with defaults
+        query_args, body_args = _build_arg_map(
+            endpoint.query_keys, endpoint.request_body_keys, exclude=path_set
+        )
+        all_arg_names = [sanitized for _, sanitized in query_args] + [sanitized for _, sanitized in body_args]
         positional_args = ["self", *path_param_names]
         keyword_args = [f"{name}=None" for name in all_arg_names] if all_arg_names else []
         method_args = positional_args + (["*"] + keyword_args if keyword_args else [])
         method_name = _python_method_name(endpoint.name)
-        query_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.query_keys]) or ""
-        json_payload = ", ".join([f'"{key}": {key.replace("-", "_")}' for key in endpoint.request_body_keys]) or ""
+        query_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in query_args]) or ""
+        json_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in body_args]) or ""
         url_for_format = _format_url(endpoint.url_template, path_param_names)
-        methods.append(
-            f"""    def {method_name}({", ".join(method_args)}):\n"""
-            f"""        \"\"\"{endpoint.description}\"\"\"\n"""
-            f"""        url = {url_for_format}\n"""
-            f"""        params = {{{query_payload}}}\n"""
-            f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
-            f"""        payload = {{{json_payload}}}\n"""
-            f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
-            f"""        response = self.session.request(\n"""
-            f"""            "{endpoint.method}",\n"""
-            f"""            url,\n"""
-            f"""            params=params or None,\n"""
-            f"""            json=payload or None,\n"""
-            f"""        )\n"""
-            f"""        response.raise_for_status()\n"""
-            f"""        return response.json() if response.content else None\n"""
-        )
+
+        content_types = getattr(endpoint, "observed_request_content_types", None) or [endpoint.request_content_type]
+        has_form = "form" in content_types
+        has_json = "json" in content_types
+
+        if has_form and has_json:
+            methods.append(
+                f"""    def {method_name}({", ".join(method_args)}):\n"""
+                f"""        \"\"\"{endpoint.description} (JSON variant)\"\"\"\n"""
+                f"""        url = {url_for_format}\n"""
+                f"""        params = {{{query_payload}}}\n"""
+                f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
+                f"""        payload = {{{json_payload}}}\n"""
+                f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
+                f"""        response = self.client.request(\n"""
+                f"""            "{endpoint.method}",\n"""
+                f"""            url,\n"""
+                f"""            params=params or None,\n"""
+                f"""            json=payload or None,\n"""
+                f"""        )\n"""
+                f"""        response.raise_for_status()\n"""
+                f"""        return response.json() if response.content else None\n"""
+            )
+            form_method_name = f"{method_name}_form"
+            methods.append(
+                f"""    def {form_method_name}({", ".join(method_args)}):\n"""
+                f"""        \"\"\"{endpoint.description} (form-encoded variant)\"\"\"\n"""
+                f"""        url = {url_for_format}\n"""
+                f"""        params = {{{query_payload}}}\n"""
+                f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
+                f"""        payload = {{{json_payload}}}\n"""
+                f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
+                f"""        response = self.client.request(\n"""
+                f"""            "{endpoint.method}",\n"""
+                f"""            url,\n"""
+                f"""            params=params or None,\n"""
+                f"""            data=payload or None,\n"""
+                f"""        )\n"""
+                f"""        response.raise_for_status()\n"""
+                f"""        return response.json() if response.content else None\n"""
+            )
+        else:
+            payload_kw = "data" if has_form else "json"
+            methods.append(
+                f"""    def {method_name}({", ".join(method_args)}):\n"""
+                f"""        \"\"\"{endpoint.description}\"\"\"\n"""
+                f"""        url = {url_for_format}\n"""
+                f"""        params = {{{query_payload}}}\n"""
+                f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
+                f"""        payload = {{{json_payload}}}\n"""
+                f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
+                f"""        response = self.client.request(\n"""
+                f"""            "{endpoint.method}",\n"""
+                f"""            url,\n"""
+                f"""            params=params or None,\n"""
+                f"""            {payload_kw}=payload or None,\n"""
+                f"""        )\n"""
+                f"""        response.raise_for_status()\n"""
+                f"""        return response.json() if response.content else None\n"""
+            )
 
     methods_body = "\n\n".join(methods)
-    return f'''"""Generated by browserclaw from {catalog.source_har}."""\n\nimport requests\n\n\nclass {class_name}:\n    def __init__(self, session: requests.Session | None = None):\n        self.session = session or requests.Session()\n\n{methods_body}\n'''
+    return f'''"""Generated by browserclaw from {catalog.source_har}."""\n\nimport httpx\n\n\nclass {class_name}:\n    def __init__(self, client: httpx.Client | None = None):\n        self.client = client or httpx.Client(follow_redirects=True)\n\n{methods_body}\n'''
 
 
 def render_mcp_tools(catalog: EndpointCatalog) -> dict:
     tools = []
     for endpoint in catalog.endpoints:
+        path_param_names = _extract_path_params(endpoint.url_template)
+        path_set = set(path_param_names)
+        query_args, body_args = _build_arg_map(
+            endpoint.query_keys, endpoint.request_body_keys, exclude=path_set
+        )
+        all_args = query_args + body_args
         properties = {}
         required = []
-        for key in endpoint.query_keys + endpoint.request_body_keys:
-            safe_name = key.replace("-", "_")
+        for orig_key, safe_name in all_args:
             properties[safe_name] = {
                 "type": "string",
-                "description": f"Inferred parameter for {key}",
+                "description": f"Inferred parameter for {orig_key}",
             }
             required.append(safe_name)
         tools.append(
