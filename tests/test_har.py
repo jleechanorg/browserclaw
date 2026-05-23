@@ -122,3 +122,40 @@ def test_infer_endpoint_catalog_detects_form_encoded() -> None:
     assert ep.request_content_type == "form"
     assert "orderId" in ep.request_body_keys
     assert "action" in ep.request_body_keys
+
+
+def test_entry_is_api_like_accept_wildcard_with_html_body_not_api() -> None:
+    """Accept: */* with HTML body must not be treated as API-like."""
+    entry = {
+        "request": {
+            "headers": [{"name": "Accept", "value": "*/*"}],
+            "method": "GET",
+            "url": "https://example.com/page",
+        },
+        "response": {
+            "status": 200,
+            "headers": [{"name": "Content-Type", "value": "text/html"}],
+            "content": {"mimeType": "text/html", "text": "<html><body>Hello</body></html>"},
+        },
+    }
+    assert _entry_is_api_like(entry) is False
+
+
+def test_entry_is_api_like_xhr_with_wildcard_accept_and_json_body() -> None:
+    """XHR request with Accept: */* and JSON body should still be API-like."""
+    entry = {
+        "request": {
+            "headers": [
+                {"name": "Accept", "value": "*/*"},
+                {"name": "X-Requested-With", "value": "XMLHttpRequest"},
+            ],
+            "method": "POST",
+            "url": "https://example.com/ajax",
+        },
+        "response": {
+            "status": 200,
+            "headers": [{"name": "Content-Type", "value": "text/html"}],
+            "content": {"mimeType": "text/html", "text": '{"ok": true}'},
+        },
+    }
+    assert _entry_is_api_like(entry) is True

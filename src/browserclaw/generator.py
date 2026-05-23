@@ -272,21 +272,55 @@ def _unique_arg_names(keys: list[str], exclude: set[str] | None = None) -> list[
     return result
 
 
+def _build_arg_map(
+    query_keys: list[str], body_keys: list[str], exclude: set[str] | None = None
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Build (original_key, sanitized_name) pairs for query and body separately.
+
+    A key appearing in both query and body gets two distinct Python args
+    (e.g. ``id`` and ``id_body``) so the caller can supply different values.
+    """
+    exclude = exclude or set()
+    seen: dict[str, int] = {}
+    query_args: list[tuple[str, str]] = []
+    body_args: list[tuple[str, str]] = []
+
+    for key in query_keys:
+        base = _python_arg_name(key)
+        if base in exclude:
+            continue
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        unique = f"{base}_{count}" if count > 0 else base
+        query_args.append((key, unique))
+
+    for key in body_keys:
+        base = _python_arg_name(key)
+        if base in exclude:
+            continue
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        unique = f"{base}_{count}" if count > 0 else base
+        body_args.append((key, unique))
+
+    return query_args, body_args
+
+
 def render_python_client(catalog: EndpointCatalog, *, class_name: str = "BrowserClawClient") -> str:
     methods: list[str] = []
     for endpoint in catalog.endpoints:
         path_param_names = _extract_path_params(endpoint.url_template)
         path_set = set(path_param_names)
-        all_args = _unique_arg_names(
-            endpoint.query_keys + endpoint.request_body_keys, exclude=path_set
+        query_args, body_args = _build_arg_map(
+            endpoint.query_keys, endpoint.request_body_keys, exclude=path_set
         )
-        all_arg_names = [sanitized for _, sanitized in all_args]
+        all_arg_names = [sanitized for _, sanitized in query_args] + [sanitized for _, sanitized in body_args]
         positional_args = ["self", *path_param_names]
         keyword_args = [f"{name}=None" for name in all_arg_names] if all_arg_names else []
         method_args = positional_args + (["*"] + keyword_args if keyword_args else [])
         method_name = _python_method_name(endpoint.name)
-        query_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in all_args if orig in endpoint.query_keys]) or ""
-        json_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in all_args if orig in endpoint.request_body_keys]) or ""
+        query_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in query_args]) or ""
+        json_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in body_args]) or ""
         url_for_format = _format_url(endpoint.url_template, path_param_names)
         payload_kw = "data" if endpoint.request_content_type == "form" else "json"
         methods.append(
@@ -316,9 +350,10 @@ def render_mcp_tools(catalog: EndpointCatalog) -> dict:
     for endpoint in catalog.endpoints:
         path_param_names = _extract_path_params(endpoint.url_template)
         path_set = set(path_param_names)
-        all_args = _unique_arg_names(
-            endpoint.query_keys + endpoint.request_body_keys, exclude=path_set
+        query_args, body_args = _build_arg_map(
+            endpoint.query_keys, endpoint.request_body_keys, exclude=path_set
         )
+        all_args = query_args + body_args
         properties = {}
         required = []
         for orig_key, safe_name in all_args:

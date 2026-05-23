@@ -13,6 +13,7 @@ from browserclaw.generator import (
     _python_arg_name,
     _extract_path_params,
     _unique_arg_names,
+    _build_arg_map,
     _auto_tags,
 )
 from browserclaw.har import infer_endpoint_catalog
@@ -223,3 +224,49 @@ def test_render_mcp_tools_excludes_path_params() -> None:
     props = result["tools"][0]["inputSchema"]["properties"]
     assert "page" in props
     assert "id" not in props
+
+
+def test_build_arg_map_overlapping_query_body_keys() -> None:
+    """Same key in query and body must produce two distinct Python args."""
+    query_args, body_args = _build_arg_map(["id", "q"], ["id", "payload"])
+    query_names = [sanitized for _, sanitized in query_args]
+    body_names = [sanitized for _, sanitized in body_args]
+    assert query_names == ["id", "q"]
+    assert body_names == ["id_1", "payload"]
+
+
+def test_render_python_client_overlapping_key() -> None:
+    """A key appearing in both query and body must generate distinct variables."""
+    ep = EndpointSignature(
+        name="search",
+        method="POST",
+        url_template="https://example.com/search",
+        host="example.com",
+        query_keys=["id"],
+        request_body_keys=["id"],
+        request_content_type="json",
+        description="test",
+    )
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[ep])
+    rendered = render_python_client(catalog)
+    assert "id=None" in rendered
+    assert "id_1=None" in rendered
+
+
+def test_render_mcp_tools_overlapping_key() -> None:
+    """MCP tools must produce distinct properties for overlapping query/body keys."""
+    ep = EndpointSignature(
+        name="search",
+        method="POST",
+        url_template="https://example.com/search",
+        host="example.com",
+        query_keys=["id"],
+        request_body_keys=["id"],
+        description="test",
+    )
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[ep])
+    result = render_mcp_tools(catalog)
+    props = result["tools"][0]["inputSchema"]["properties"]
+    assert "id" in props
+    assert "id_1" in props
+    assert len(props) == 2

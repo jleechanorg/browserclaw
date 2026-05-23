@@ -104,8 +104,8 @@ def _entry_is_api_like(entry: dict) -> bool:
         if body and body.lstrip().startswith(("{", "[")):
             return True
 
-    # Accept: application/... or */* with JSON-shaped body
-    if accept in ("*/*", "") or accept.startswith("application/"):
+    # Accept: application/... with JSON-shaped body
+    if accept.startswith("application/"):
         body = entry.get("response", {}).get("content", {}).get("text", "")
         if body and body.lstrip().startswith(("{", "[")):
             return True
