@@ -209,6 +209,8 @@ def main() -> None:
         return
 
     if args.command == "generate":
+        if getattr(args, 'save_skill', False) and not args.url:
+            parser.error("--save-skill requires --url")
         catalog = EndpointCatalog.from_dict(json.loads(Path(args.catalog).read_text()))
         site_url = args.url if getattr(args, 'save_skill', False) else None
         bundle = generate_bundle(catalog, args.output_dir, site_url=site_url)

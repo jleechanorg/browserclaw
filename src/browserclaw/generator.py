@@ -252,26 +252,6 @@ def _format_url(url_template: str, path_params: list[str]) -> str:
     return f'"{positional_template}".format(' + ", ".join(path_params) + ")"
 
 
-def _unique_arg_names(keys: list[str], exclude: set[str] | None = None) -> list[tuple[str, str]]:
-    """Map original keys to unique sanitized arg names.
-
-    Returns list of (original_key, sanitized_name) pairs.
-    Collisions (e.g. ``a.b`` and ``a-b`` both becoming ``a_b``) get a numeric suffix.
-    """
-    exclude = exclude or set()
-    seen: dict[str, int] = {}
-    result: list[tuple[str, str]] = []
-    for key in keys:
-        base = _python_arg_name(key)
-        if base in exclude:
-            continue
-        count = seen.get(base, 0)
-        seen[base] = count + 1
-        unique = f"{base}_{count}" if count > 0 else base
-        result.append((key, unique))
-    return result
-
-
 def _build_arg_map(
     query_keys: list[str], body_keys: list[str], exclude: set[str] | None = None
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
@@ -322,24 +302,66 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
         query_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in query_args]) or ""
         json_payload = ", ".join([f'"{orig}": {sanitized}' for orig, sanitized in body_args]) or ""
         url_for_format = _format_url(endpoint.url_template, path_param_names)
-        payload_kw = "data" if endpoint.request_content_type == "form" else "json"
-        methods.append(
-            f"""    def {method_name}({", ".join(method_args)}):\n"""
-            f"""        \"\"\"{endpoint.description}\"\"\"\n"""
-            f"""        url = {url_for_format}\n"""
-            f"""        params = {{{query_payload}}}\n"""
-            f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
-            f"""        payload = {{{json_payload}}}\n"""
-            f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
-            f"""        response = self.client.request(\n"""
-            f"""            "{endpoint.method}",\n"""
-            f"""            url,\n"""
-            f"""            params=params or None,\n"""
-            f"""            {payload_kw}=payload or None,\n"""
-            f"""        )\n"""
-            f"""        response.raise_for_status()\n"""
-            f"""        return response.json() if response.content else None\n"""
-        )
+
+        content_types = getattr(endpoint, "observed_request_content_types", None) or [endpoint.request_content_type]
+        has_form = "form" in content_types
+        has_json = "json" in content_types
+
+        if has_form and has_json:
+            methods.append(
+                f"""    def {method_name}({", ".join(method_args)}):\n"""
+                f"""        \"\"\"{endpoint.description} (JSON variant)\"\"\"\n"""
+                f"""        url = {url_for_format}\n"""
+                f"""        params = {{{query_payload}}}\n"""
+                f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
+                f"""        payload = {{{json_payload}}}\n"""
+                f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
+                f"""        response = self.client.request(\n"""
+                f"""            "{endpoint.method}",\n"""
+                f"""            url,\n"""
+                f"""            params=params or None,\n"""
+                f"""            json=payload or None,\n"""
+                f"""        )\n"""
+                f"""        response.raise_for_status()\n"""
+                f"""        return response.json() if response.content else None\n"""
+            )
+            form_method_name = f"{method_name}_form"
+            methods.append(
+                f"""    def {form_method_name}({", ".join(method_args)}):\n"""
+                f"""        \"\"\"{endpoint.description} (form-encoded variant)\"\"\"\n"""
+                f"""        url = {url_for_format}\n"""
+                f"""        params = {{{query_payload}}}\n"""
+                f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
+                f"""        payload = {{{json_payload}}}\n"""
+                f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
+                f"""        response = self.client.request(\n"""
+                f"""            "{endpoint.method}",\n"""
+                f"""            url,\n"""
+                f"""            params=params or None,\n"""
+                f"""            data=payload or None,\n"""
+                f"""        )\n"""
+                f"""        response.raise_for_status()\n"""
+                f"""        return response.json() if response.content else None\n"""
+            )
+        else:
+            payload_kw = "data" if has_form else "json"
+            methods.append(
+                f"""    def {method_name}({", ".join(method_args)}):\n"""
+                f"""        \"\"\"{endpoint.description}\"\"\"\n"""
+                f"""        url = {url_for_format}\n"""
+                f"""        params = {{{query_payload}}}\n"""
+                f"""        params = {{key: value for key, value in params.items() if value is not None}}\n"""
+                f"""        payload = {{{json_payload}}}\n"""
+                f"""        payload = {{key: value for key, value in payload.items() if value is not None}}\n"""
+                f"""        response = self.client.request(\n"""
+                f"""            "{endpoint.method}",\n"""
+                f"""            url,\n"""
+                f"""            params=params or None,\n"""
+                f"""            {payload_kw}=payload or None,\n"""
+                f"""        )\n"""
+                f"""        response.raise_for_status()\n"""
+                f"""        return response.json() if response.content else None\n"""
+            )
 
     methods_body = "\n\n".join(methods)
     return f'''"""Generated by browserclaw from {catalog.source_har}."""\n\nimport httpx\n\n\nclass {class_name}:\n    def __init__(self, client: httpx.Client | None = None):\n        self.client = client or httpx.Client(follow_redirects=True)\n\n{methods_body}\n'''

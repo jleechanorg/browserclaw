@@ -159,3 +159,61 @@ def test_entry_is_api_like_xhr_with_wildcard_accept_and_json_body() -> None:
         },
     }
     assert _entry_is_api_like(entry) is True
+
+
+def test_infer_endpoint_catalog_mixed_form_and_json() -> None:
+    """Endpoint observed with both form and JSON requests must track both content types."""
+    import json
+    import tempfile
+
+    har = {
+        "log": {
+            "entries": [
+                {
+                    "request": {
+                        "method": "POST",
+                        "url": "https://example.com/api/submit",
+                        "headers": [
+                            {"name": "Content-Type", "value": "application/x-www-form-urlencoded"}
+                        ],
+                        "postData": {
+                            "mimeType": "application/x-www-form-urlencoded",
+                            "params": [{"name": "field", "value": "a"}],
+                        },
+                    },
+                    "response": {
+                        "status": 200,
+                        "headers": [{"name": "Content-Type", "value": "application/json"}],
+                        "content": {"mimeType": "application/json", "text": "{}"},
+                    },
+                },
+                {
+                    "request": {
+                        "method": "POST",
+                        "url": "https://example.com/api/submit",
+                        "headers": [
+                            {"name": "Content-Type", "value": "application/json"}
+                        ],
+                        "postData": {
+                            "mimeType": "application/json",
+                            "text": '{"field": "b"}',
+                        },
+                    },
+                    "response": {
+                        "status": 200,
+                        "headers": [{"name": "Content-Type", "value": "application/json"}],
+                        "content": {"mimeType": "application/json", "text": "{}"},
+                    },
+                },
+            ]
+        }
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".har", delete=False) as f:
+        json.dump(har, f)
+        har_path = f.name
+
+    catalog = infer_endpoint_catalog(har_path, site="example")
+    assert len(catalog.endpoints) == 1
+    ep = catalog.endpoints[0]
+    assert "form" in ep.observed_request_content_types
+    assert "json" in ep.observed_request_content_types

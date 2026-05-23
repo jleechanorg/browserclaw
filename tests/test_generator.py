@@ -12,7 +12,6 @@ from browserclaw.generator import (
     _python_method_name,
     _python_arg_name,
     _extract_path_params,
-    _unique_arg_names,
     _build_arg_map,
     _auto_tags,
 )
@@ -135,24 +134,6 @@ def test_generated_client_json_endpoint_uses_json() -> None:
     assert "json=payload or None" in rendered
 
 
-def test_unique_arg_names_collision_suffix() -> None:
-    """Keys that sanitize to the same name must get unique suffixes."""
-    result = _unique_arg_names(["a.b", "a-b", "a_b"])
-    names = [sanitized for _, sanitized in result]
-    assert len(names) == 3
-    assert len(set(names)) == 3
-    assert names[0] == "a_b"
-    assert names[1] == "a_b_1"
-    assert names[2] == "a_b_2"
-
-
-def test_unique_arg_names_excludes_path_params() -> None:
-    """Keys colliding with path params must be excluded."""
-    result = _unique_arg_names(["id", "query"], exclude={"id"})
-    assert len(result) == 1
-    assert result[0] == ("query", "query")
-
-
 def test_generated_client_follow_redirects() -> None:
     """Generated httpx.Client must set follow_redirects=True."""
     catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[])
@@ -270,3 +251,24 @@ def test_render_mcp_tools_overlapping_key() -> None:
     assert "id" in props
     assert "id_1" in props
     assert len(props) == 2
+
+
+def test_render_python_client_mixed_content_types() -> None:
+    """Endpoint with both form and JSON observed should emit two methods."""
+    ep = EndpointSignature(
+        name="submit",
+        method="POST",
+        url_template="https://example.com/submit",
+        host="example.com",
+        query_keys=[],
+        request_body_keys=["data"],
+        request_content_type="json",
+        observed_request_content_types=["form", "json"],
+        description="mixed endpoint",
+    )
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[ep])
+    rendered = render_python_client(catalog)
+    assert "def submit(" in rendered
+    assert "json=payload or None" in rendered
+    assert "def submit_form(" in rendered
+    assert "data=payload or None" in rendered

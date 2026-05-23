@@ -60,3 +60,26 @@ def test_generate_skill_with_save_skill_flag(tmp_path: Path) -> None:
     ])
     site_url = args.url if getattr(args, "save_skill", False) else None
     assert site_url == "https://example.com"
+
+
+def test_generate_save_skill_without_url_errors(tmp_path: Path, monkeypatch) -> None:
+    """--save-skill without --url must cause a parser error."""
+    import pytest
+    from browserclaw.cli import main
+
+    catalog = EndpointCatalog(
+        site="example.com",
+        source_har="t.har",
+        notes=[],
+        endpoints=[],
+    )
+    cat_path = _write_catalog(tmp_path / "input", catalog)
+    out_dir = tmp_path / "output"
+
+    monkeypatch.setattr("sys.argv", [
+        "browserclaw", "generate",
+        "--catalog", str(cat_path), "--output-dir", str(out_dir), "--save-skill",
+    ])
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
