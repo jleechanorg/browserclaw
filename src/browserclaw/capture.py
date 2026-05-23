@@ -357,12 +357,12 @@ class _WsCaptureSession:
         initiator = event.get("initiator", {})
         req_headers = {}
         if isinstance(initiator, dict):
-            # Stack trace may contain URL info but not full headers
             pass
+        created_at = event.get("timestamp", time.time())
         self.connections[rid] = WebSocketConnection(
             connection_id=rid,
             url=ws_url,
-            created_at=time.time(),
+            created_at=created_at,
             request_headers=req_headers,
         )
 
@@ -420,7 +420,7 @@ class _WsCaptureSession:
         rid = event["requestId"]
         conn = self.connections.get(rid)
         if conn:
-            conn.closed_at = time.time()
+            conn.closed_at = event.get("timestamp", time.time())
 
     def _maybe_parse_firestore(self, conn: WebSocketConnection, frame: WebSocketFrame):
         """If this is a Firestore connection, parse the frame for RPC calls."""

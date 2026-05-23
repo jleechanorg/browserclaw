@@ -314,13 +314,17 @@ def render_python_client(catalog: EndpointCatalog, *, class_name: str = "Browser
 def render_mcp_tools(catalog: EndpointCatalog) -> dict:
     tools = []
     for endpoint in catalog.endpoints:
+        path_param_names = _extract_path_params(endpoint.url_template)
+        path_set = set(path_param_names)
+        all_args = _unique_arg_names(
+            endpoint.query_keys + endpoint.request_body_keys, exclude=path_set
+        )
         properties = {}
         required = []
-        for key in endpoint.query_keys + endpoint.request_body_keys:
-            safe_name = _python_arg_name(key)
+        for orig_key, safe_name in all_args:
             properties[safe_name] = {
                 "type": "string",
-                "description": f"Inferred parameter for {key}",
+                "description": f"Inferred parameter for {orig_key}",
             }
             required.append(safe_name)
         tools.append(

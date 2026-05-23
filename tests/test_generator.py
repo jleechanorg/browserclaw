@@ -186,3 +186,40 @@ def test_generate_bundle_creates_skill_with_site_url(tmp_path: Path) -> None:
     catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[])
     bundle = generate_bundle(catalog, tmp_path, site_url="https://example.com")
     assert "skill" in bundle
+
+
+def test_render_mcp_tools_collision_suffix() -> None:
+    """MCP tools must deduplicate colliding sanitized arg names."""
+    ep = EndpointSignature(
+        name="submit",
+        method="POST",
+        url_template="https://example.com/submit",
+        host="example.com",
+        query_keys=["a.b", "a-b"],
+        request_body_keys=[],
+        description="test",
+    )
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[ep])
+    result = render_mcp_tools(catalog)
+    props = result["tools"][0]["inputSchema"]["properties"]
+    assert len(props) == 2
+    assert "a_b" in props
+    assert "a_b_1" in props
+
+
+def test_render_mcp_tools_excludes_path_params() -> None:
+    """MCP tools must not include path params as input properties."""
+    ep = EndpointSignature(
+        name="get_item",
+        method="GET",
+        url_template="https://example.com/items/{id}",
+        host="example.com",
+        query_keys=["page"],
+        request_body_keys=[],
+        description="test",
+    )
+    catalog = EndpointCatalog(site="x", source_har="t.har", notes=[], endpoints=[ep])
+    result = render_mcp_tools(catalog)
+    props = result["tools"][0]["inputSchema"]["properties"]
+    assert "page" in props
+    assert "id" not in props

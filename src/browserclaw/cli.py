@@ -210,7 +210,7 @@ def main() -> None:
 
     if args.command == "generate":
         catalog = EndpointCatalog.from_dict(json.loads(Path(args.catalog).read_text()))
-        site_url = getattr(args, 'url', None) if getattr(args, 'save_skill', False) else None
+        site_url = args.url if getattr(args, 'save_skill', False) else None
         bundle = generate_bundle(catalog, args.output_dir, site_url=site_url)
         print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
         return
