@@ -358,3 +358,29 @@ def test_write_read_cookies_json_roundtrip(tmp_path: Path):
     assert read_back[0].name == "d"
     assert read_back[0].value == "xoxd-abc"
     assert read_back[1].expires == -1
+
+
+def test_write_read_cookies_json_preserves_host_only(tmp_path: Path):
+    """Round-trip must keep host_only flag — used by to_playwright() to pick
+    between `domain` and `url` form. Without this, host-only cookies would be
+    re-emitted as domain cookies on the next inject."""
+    out = tmp_path / "cookies.json"
+    cookies = [
+        Cookie(
+            name="d", value="xoxd-abc", domain="slack.com", path="/",
+            expires=1816379970, secure=True, httpOnly=True, sameSite="Lax",
+            host_only=True,
+        ),
+        Cookie(
+            name="b", value="xoxb-xyz", domain=".slack.com", path="/",
+            expires=-1, secure=True, httpOnly=False, sameSite="None",
+            host_only=False,
+        ),
+    ]
+    write_cookies_json(cookies, out)
+    read_back = read_cookies_json(out)
+    assert len(read_back) == 2
+    assert read_back[0].host_only is True
+    assert read_back[0].domain == "slack.com"
+    assert read_back[1].host_only is False
+    assert read_back[1].domain == ".slack.com"

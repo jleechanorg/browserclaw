@@ -397,6 +397,7 @@ def read_cookies_json(path: str | Path) -> list[Cookie]:
             secure=c.get("secure", False),
             httpOnly=c.get("httpOnly", False),
             sameSite=c.get("sameSite", "Lax") if c.get("sameSite") in ("Strict", "Lax", "None") else "Lax",
+            host_only=bool(c.get("host_only", False)),
         )
         for c in data.get("cookies", [])
     ]
