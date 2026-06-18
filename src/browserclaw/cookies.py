@@ -75,6 +75,7 @@ class Cookie:
     secure: bool
     httpOnly: bool
     sameSite: str  # "Strict" | "Lax" | "None"
+    host_only: bool = False  # True if Chromium stored this as host-only (no leading dot)
 
     def to_playwright(self) -> dict:
         """Return a dict ready to feed into `BrowserContext.add_cookies()`.
@@ -84,10 +85,18 @@ class Cookie:
         `expires_utc` as Windows file time (100-nanosecond intervals since
         1601-01-01 UTC); we convert it in `decrypt_chrome_cookies()` so the
         value here is already Unix seconds.
+
+        Domain scoping: Chromium stores host-only cookies with no leading dot
+        on `host_key` (e.g. ``slack.com``) and domain cookies with a leading
+        dot (e.g. ``.slack.com``). Playwright's ``add_cookies`` accepts both,
+        but injecting a leading dot into a host-only cookie widens its scope
+        to all subdomains, which is a privacy/auth boundary violation. Pass
+        through the original ``host_key`` form verbatim and use Playwright's
+        ``sameSite`` field (which has its own Strict/Lax/None enum).
         """
-        domain = self.domain if self.domain.startswith(".") else f".{self.domain}"
+        domain = self.domain  # preserve host-only vs domain as stored by Chrome
         same_site = self.sameSite if self.sameSite in ("Strict", "Lax", "None") else "Lax"
-        return {
+        cookie: dict = {
             "name": self.name,
             "value": self.value,
             "domain": domain,
@@ -97,6 +106,18 @@ class Cookie:
             "secure": self.secure,
             "sameSite": same_site,
         }
+        # Playwright uses ``url`` for host-only cookies (no domain attr). When
+        # we have no domain and no host_only, fall back to url construction.
+        if self.host_only:
+            cookie.pop("domain", None)
+            # Build a URL origin that matches the host. If host looks like a
+            # plain hostname (no scheme), prefix https:// for storage_state.
+            host = self.domain if self.domain else ""
+            if host and not host.startswith("http"):
+                cookie["url"] = f"https://{host}{self.path or '/'}"
+            elif host:
+                cookie["url"] = host
+        return cookie
 
 
 class CookieDecryptError(Exception):
@@ -166,10 +187,36 @@ def _chrome_expires_to_unix(expires_utc: int) -> int:
     return int(unix_ts) if unix_ts > 0 else -1
 
 
+def _decrypt_chacha20_poly1305(ciphertext: bytes, key: bytes) -> bytes:
+    """Decrypt a ChaCha20-Poly1305 encrypted_value blob (Chromium ``v20``).
+
+    The 12-byte nonce lives at the start of the ciphertext, followed by the
+    AEAD-encrypted ciphertext+tag. Chromium derives the ChaCha20 key the
+    same way as the AES key (PBKDF2-HMAC-SHA1, salt="saltysalt", 1003
+    iterations) but with a 32-byte output length — see
+    ``components/os_crypt/sync/os_crypt_mac.mm`` (ChaCha20-Poly1305 path).
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    if len(ciphertext) < 12 + 16:
+        raise ValueError("ChaCha20 ciphertext too short (need nonce + tag)")
+    nonce = ciphertext[:12]
+    body = ciphertext[12:-16]
+    tag = ciphertext[-16:]
+    aead = ChaCha20Poly1305(key)
+    return aead.decrypt(nonce, body + tag, associated_data=None)
+
+
 def _decrypt_value(encrypted: bytes, key: bytes, db_version: int) -> str:
     """Decrypt a single Chromium encrypted_value blob.
 
-    Layout: version prefix (3 bytes "v10"/"v11"/"v20") || AES-128-CBC ciphertext
+    Layout: version prefix (3 bytes "v10"/"v11"/"v20") || <ciphertext>
+
+    Ciphertext choice:
+    - ``v10``: AES-128-CBC, IV = 16 spaces (the macOS legacy path).
+    - ``v11``: AES-256-CBC (rare; macOS only emits on first-write after a
+      profile upgrade).
+    - ``v20``: ChaCha20-Poly1305 AEAD (newer profiles; nonce = first 12 bytes).
 
     For DB v24+ the decrypted plaintext starts with SHA256(host) (32 bytes)
     before the actual cookie value. The SHA256 prefix lives INSIDE the
@@ -177,23 +224,46 @@ def _decrypt_value(encrypted: bytes, key: bytes, db_version: int) -> str:
 
     Order:
     1. Verify first 3 bytes are v10/v11/v20
-    2. AES-128-CBC decrypt the remainder
+    2. Pick the right cipher for the prefix and decrypt
     3. For DB v24+: strip the leading 32-byte SHA256(host) prefix from plaintext
-    4. PKCS#7 unpad
-    5. UTF-8 decode
+    4. PKCS#7 unpad (AES only — ChaCha20 is authenticated, no padding)
+    5. UTF-8 decode (fall back to hex on decode error)
     """
     if not encrypted or encrypted[:3] not in ENCRYPTED_PREFIXES:
         return ""
-    cipher = Cipher(algorithms.AES(key), modes.CBC(CBC_IV))
+    body = encrypted[3:]
+    prefix = encrypted[:3]
+
+    if prefix == b"v20":
+        # ChaCha20-Poly1305 (AEAD); PKDF2 key derivation uses dkLen=32 for
+        # this path. Caller passes the matching 32-byte key in via ``key``.
+        try:
+            plain = _decrypt_chacha20_poly1305(body, key)
+        except Exception:
+            return ""
+        # ChaCha20 has no padding; DB v24 SHA256 prefix lives inside plaintext.
+        if db_version >= 24:
+            plain = plain[32:]
+        try:
+            return plain.decode("utf-8")
+        except UnicodeDecodeError:
+            return plain.hex()
+
+    # v10 → AES-128, v11 → AES-256
+    key_len = 32 if prefix == b"v11" else 16
+    if len(key) < key_len:
+        return ""
+    cipher = Cipher(algorithms.AES(key[:key_len]), modes.CBC(CBC_IV))
     decryptor = cipher.decryptor()
-    plain = decryptor.update(encrypted[3:]) + decryptor.finalize()
+    plain = decryptor.update(body) + decryptor.finalize()
     if db_version >= 24:
         plain = plain[32:]  # SHA256(host) prefix lives inside the plaintext
     # PKCS#7 unpad
-    pad = plain[-1]
-    if isinstance(pad, int) and 1 <= pad <= 16:
-        if plain[-pad:] == bytes([pad]) * pad:
-            plain = plain[:-pad]
+    if plain:
+        pad = plain[-1]
+        if isinstance(pad, int) and 1 <= pad <= 16:
+            if plain[-pad:] == bytes([pad]) * pad:
+                plain = plain[:-pad]
     try:
         return plain.decode("utf-8")
     except UnicodeDecodeError:
@@ -268,7 +338,17 @@ def decrypt_chrome_cookies(
                 "where host_key like ? and length(encrypted_value) > 0"
             )
             for row in conn.execute(query, (domain_filter,)):
-                value = _decrypt_value(row["encrypted_value"], key, meta_version)
+                encrypted = row["encrypted_value"]
+                host_key: str = row["host_key"] or ""
+                # Per-cookie error handling: a single truncated ciphertext,
+                # a non-block-aligned blob, or an unrecognized prefix MUST
+                # NOT abort the whole decrypt — Chromium's DB is occasionally
+                # half-written and a single bad row should not deny access
+                # to the rest of the user's session cookies.
+                try:
+                    value = _decrypt_value(encrypted, key, meta_version)
+                except Exception:
+                    continue
                 if not value:
                     continue
                 samesite_idx = row["samesite"]
@@ -276,12 +356,13 @@ def decrypt_chrome_cookies(
                     Cookie(
                         name=row["name"],
                         value=value,
-                        domain=row["host_key"],
+                        domain=host_key,
                         path=row["path"] or "/",
                         expires=_chrome_expires_to_unix(row["expires_utc"]),
                         secure=bool(row["is_secure"]),
                         httpOnly=bool(row["is_httponly"]),
                         sameSite=_SAMESITE.get(samesite_idx, "Lax"),
+                        host_only=not host_key.startswith("."),
                     )
                 )
             return cookies

@@ -9,6 +9,7 @@ Tests run on macOS only (uses Keychain) but skip cleanly on other platforms.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 import sqlite3
@@ -193,13 +194,124 @@ def test_decrypt_chrome_cookies_non_chromium_db(tmp_path: Path, monkeypatch):
     assert "not a Chromium Cookies DB" in str(excinfo.value)
 
 
-def test_to_playwright_session_cookie_normalizes_domain():
+def test_decrypt_chrome_cookies_skips_bad_row(tmp_path: Path, monkeypatch):
+    """A single malformed ciphertext must NOT abort the whole decrypt pass."""
+    db = tmp_path / "Cookies"
+    import time
+
+    import browserclaw.cookies as cookies_mod
+
+    # One good cookie, then one with a truncated (non-block-aligned) ciphertext.
+    _build_cookie_db(db, VALUE.encode("utf-8"), HOST, NAME)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "insert into cookies values (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            HOST,
+            "broken",
+            "/",
+            int((time.time() + 30 * 86400 + 11644473600) * 1_000_000),
+            1,
+            1,
+            1,
+            b"v10" + b"\x00" * 5,  # 5-byte ciphertext — too short for AES
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(cookies_mod, "keychain_password", lambda *a, **k: PASSWORD)
+    cookies = decrypt_chrome_cookies(db, domain_filter="%slack.com%")
+    # We get the good cookie; the bad row was skipped, not raised.
+    assert len(cookies) == 1
+    assert cookies[0].name == NAME
+
+
+def test_decrypt_value_v20_chacha20_poly1305_roundtrip():
+    """v20 prefix dispatches to ChaCha20-Poly1305 with the matching 32-byte key.
+
+    Builds a v20 encrypted_value blob using the cryptography library and
+    confirms ``_decrypt_value`` recovers the original plaintext (with DB v24
+    SHA256(host) prefix handling). This guards against the v20 → AES
+    regression where v20 cookies would decrypt to garbage.
+    """
+    import hashlib
+
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    from browserclaw.cookies import _decrypt_value
+
+    # 32-byte ChaCha20 key — Chromium derives with PBKDF2 dkLen=32 for this path.
+    chacha_key = b"\x11" * 32
+    plaintext = b"xoxd-chacha20-payload"
+    host = "slack.com"
+
+    # Chromium v24 layout: SHA256(host) || plaintext, no PKCS#7 padding
+    # (AEAD ciphers don't pad). ChaCha20-Poly1305: nonce(12) || ct || tag(16).
+    inner = hashlib.sha256(host.encode("utf-8")).digest() + plaintext
+    nonce = b"\x22" * 12
+    aead = ChaCha20Poly1305(chacha_key)
+    ct_with_tag = aead.encrypt(nonce, inner, associated_data=None)
+    body = nonce + ct_with_tag  # 12-byte nonce || ciphertext || 16-byte tag
+    encrypted = b"v20" + body
+
+    out = _decrypt_value(encrypted, chacha_key, db_version=24)
+    assert out == plaintext.decode("utf-8")
+
+
+def test_decrypt_value_v10_still_aes_after_v20_path_added():
+    """v10 prefix must STILL route to AES-128-CBC, not be hijacked by v20 logic."""
+    from browserclaw.cookies import _decrypt_value
+
+    aes_key = derive_aes_key(PASSWORD)
+    host = ".slack.com"
+    plaintext = b"xoxd-aes-v10-payload"
+
+    # Build v10 layout: AES-CBC( PKCS7-pad( SHA256(host) || plaintext ) ) + "v10"
+    body = hashlib.sha256(host.encode("utf-8")).digest() + plaintext
+    pad_len = 16 - (len(body) % 16)
+    padded = body + bytes([pad_len]) * pad_len
+    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(CBC_IV))
+    enc = cipher.encryptor()
+    ciphertext = enc.update(padded) + enc.finalize()
+    encrypted = b"v10" + ciphertext
+
+    out = _decrypt_value(encrypted, aes_key, db_version=24)
+    assert out == plaintext.decode("utf-8")
+
+
+def test_decrypt_value_unrecognized_prefix_returns_empty():
+    """A blob with neither v10/v11/v20 prefix returns '' instead of crashing."""
+    from browserclaw.cookies import _decrypt_value
+
+    out = _decrypt_value(b"v99" + b"\x00" * 16, b"\x00" * 16, db_version=24)
+    assert out == ""
+
+
+def test_to_playwright_session_cookie_preserves_domain_form():
+    """Domain cookie (leading dot) — pass through verbatim, no widening."""
     c = Cookie(
-        name="d", value="x", domain="slack.com", path="/",
+        name="d", value="x", domain=".slack.com", path="/",
         expires=-1, secure=True, httpOnly=True, sameSite="Lax",
     )
     pw = c.to_playwright()
-    assert pw["domain"] == ".slack.com"  # leading dot
+    assert pw["domain"] == ".slack.com"
+    assert pw["expires"] == -1
+    assert pw["sameSite"] == "Lax"
+
+
+def test_to_playwright_host_only_cookie_not_widened():
+    """Host-only cookie (no leading dot) — preserve verbatim, do NOT widen."""
+    c = Cookie(
+        name="d", value="x", domain="slack.com", path="/",
+        expires=-1, secure=True, httpOnly=True, sameSite="Lax",
+        host_only=True,
+    )
+    pw = c.to_playwright()
+    # Playwright wants `url` not `domain` for host-only cookies; the host
+    # itself must NOT get a leading dot (would widen scope to all subdomains).
+    assert "domain" not in pw
+    assert pw["url"] == "https://slack.com/"
     assert pw["expires"] == -1
     assert pw["sameSite"] == "Lax"
 
