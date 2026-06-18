@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -12,6 +13,12 @@ from .capture import (
     capture_responses_superpower,
     load_steps,
 )
+from .cookies import (
+    Cookie,
+    decrypt_chrome_cookies,
+    read_cookies_json,
+    write_cookies_json,
+)
 from .generator import _slug_from_url, generate_bundle, generate_ws_bundle
 from .har import build_catalog_from_responses, infer_endpoint_catalog
 from .llm import enrich_catalog, plan_steps
@@ -21,6 +28,77 @@ from .models import EndpointCatalog
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="browserclaw")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # ── Cookie decryption / injection ─────────────────────────────────────────
+    cookies_parser = subparsers.add_parser(
+        "cookies",
+        help="Decrypt Chrome/Brave/Edge cookies from the local SQLite DB or "
+             "inject them into a Playwright session",
+    )
+    cookies_sub = cookies_parser.add_subparsers(dest="cookies_action", required=True)
+
+    decrypt_p = cookies_sub.add_parser(
+        "decrypt",
+        help="Decrypt cookies from a Chrome-format Cookies SQLite DB",
+    )
+    decrypt_p.add_argument(
+        "--db",
+        required=True,
+        help="Path to Cookies SQLite (e.g. ~/Library/Application Support/Google/Chrome/Default/Cookies). "
+             "Will be COPIED to a temp file before opening — safe to pass the live file.",
+    )
+    decrypt_p.add_argument(
+        "--output", "-o",
+        required=True,
+        help="Path to write the decrypted cookies JSON (Playwright storage_state compatible)",
+    )
+    decrypt_p.add_argument(
+        "--domain-filter", default="%",
+        help="SQL LIKE pattern on host_key, e.g. %%slack.com%%. Default: %% (all domains)",
+    )
+    decrypt_p.add_argument(
+        "--keychain-service", default="Chrome Safe Storage",
+        help='macOS Keychain service name. "Brave Safe Storage" or "Microsoft Edge Safe Storage" for other browsers.',
+    )
+    decrypt_p.add_argument(
+        "--keychain-account", default="Chrome",
+        help='macOS Keychain account. "Brave" or "Microsoft Edge" for other browsers.',
+    )
+    decrypt_p.add_argument(
+        "--summary", action="store_true",
+        help="Print a one-line summary per cookie (domain, name, length) instead of full values",
+    )
+
+    inject_p = cookies_sub.add_parser(
+        "inject",
+        help="Open a Playwright Chrome and inject a cookies.json then navigate to a URL. "
+             "Combines the read path (decrypted cookies) with the navigate-and-go step.",
+    )
+    inject_p.add_argument(
+        "--cookies", required=True,
+        help="Path to a cookies.json (either from `browserclaw cookies decrypt` or a Playwright storage_state file)",
+    )
+    inject_p.add_argument(
+        "--goto", required=True,
+        help="URL to navigate to after cookie injection",
+    )
+    inject_p.add_argument(
+        "--browser-channel", default="chrome",
+        help='Playwright browser channel (default: "chrome"). Use "chromium" for headless test browsers.',
+    )
+    inject_p.add_argument("--headless", action="store_true")
+    inject_p.add_argument(
+        "--wait-after-load", type=float, default=5.0,
+        help="Seconds to wait after `page.goto` returns, before printing diagnostics.",
+    )
+    inject_p.add_argument(
+        "--screenshot", default=None,
+        help="If set, save a full-page screenshot to this path after navigation.",
+    )
+    inject_p.add_argument(
+        "--print-text", type=int, default=0,
+        help="If >0, print the first N characters of document.body.innerText after navigation.",
+    )
 
     # ── HAR capture ────────────────────────────────────────────────────────────
     capture_parser = subparsers.add_parser("capture")
@@ -161,6 +239,10 @@ def _parse_extra_headers(raw: list[str] | None) -> dict[str, str] | None:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.command == "cookies":
+        _cmd_cookies(args)
+        return
 
     if args.command == "capture":
         steps = _resolve_steps(args)
@@ -374,6 +456,99 @@ def main() -> None:
         return
 
     parser.error(f"Unhandled command: {args.command}")
+
+
+def _cmd_cookies(args: argparse.Namespace) -> None:
+    """Dispatch handler for `browserclaw cookies {decrypt,inject}`."""
+    if args.cookies_action == "decrypt":
+        cookies = decrypt_chrome_cookies(
+            args.db,
+            domain_filter=args.domain_filter,
+            keychain_service=args.keychain_service,
+            keychain_account=args.keychain_account,
+        )
+        write_cookies_json(cookies, args.output)
+        if args.summary:
+            print(f"# Wrote {len(cookies)} cookies to {args.output}")
+            for c in cookies:
+                v = c.value
+                print(f"  {c.domain:30s} {c.name:20s} len={len(v):5d}")
+        else:
+            summary = [
+                {
+                    "name": c.name,
+                    "domain": c.domain,
+                    "length": len(c.value),
+                    "secure": c.secure,
+                    "httpOnly": c.httpOnly,
+                    "sameSite": c.sameSite,
+                }
+                for c in cookies
+            ]
+            print(json.dumps(summary, indent=2))
+        return
+
+    if args.cookies_action == "inject":
+        asyncio.run(_cmd_cookies_inject(args))
+        return
+
+    raise SystemExit(f"Unknown cookies action: {args.cookies_action}")
+
+
+async def _cmd_cookies_inject(args: argparse.Namespace) -> None:
+    """Open Playwright Chrome, inject cookies, navigate to --goto URL, print diagnostics."""
+    import asyncio
+
+    from playwright.async_api import async_playwright
+
+    cookies = read_cookies_json(args.cookies)
+    if not cookies:
+        raise SystemExit(f"No cookies found in {args.cookies}")
+
+    pw_cookies = [c.to_playwright() for c in cookies]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            channel=args.browser_channel,
+            headless=args.headless,
+            args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--no-first-run",
+                "--remote-allow-origins=*",
+            ],
+        )
+        try:
+            context = await browser.new_context(viewport={"width": 1280, "height": 900})
+            await context.add_cookies(pw_cookies)
+            page = await context.new_page()
+            await page.goto(args.goto, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(int(args.wait_after_load * 1000))
+
+            print(json.dumps({
+                "url": page.url,
+                "title": await page.title(),
+                "cookies_injected": len(pw_cookies),
+            }, indent=2))
+
+            if args.print_text > 0:
+                try:
+                    text = await page.evaluate("document.body.innerText")
+                    print(f"\n--- Page text (first {args.print_text} chars) ---")
+                    print(text[:args.print_text])
+                except Exception as exc:
+                    print(f"print-text err: {exc}")
+
+            if args.screenshot:
+                try:
+                    await page.screenshot(path=args.screenshot, full_page=True, timeout=15000)
+                    print(f"\nScreenshot: {args.screenshot}")
+                except Exception as exc:
+                    print(f"screenshot err: {exc}")
+
+            await context.close()
+        finally:
+            await browser.close()
 
 
 if __name__ == "__main__":
