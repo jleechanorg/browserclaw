@@ -27,10 +27,10 @@ The app is a **Firebase-backed SPA**:
 
 ```javascript
 {
-  apiKey: 'AIzaSyARs7IekRptvhZIwtV7lwJh3axWFsn_4c8',
-  authDomain: 'worldarchitecture-ai.firebaseapp.com',
-  projectId: 'worldarchitecture-ai',
-  storageBucket: 'worldarchitecture-ai.firebasestorage.app',
+  apiKey: '<your-firebase-api-key>',
+  authDomain: '<your-firebase-project-id>.firebaseapp.com',
+  projectId: '<your-firebase-project-id>',
+  storageBucket: '<your-firebase-project-id>.firebasestorage.app',
   messagingSenderId: '754683067800',
   appId: '1:754683067800:web:3b38787c69de301c147fed'
 }
@@ -57,7 +57,7 @@ for c in campaigns:
 
 ### Option 2: Firebase REST API (authenticated)
 
-Firebase Firestore has a REST API at `https://firestore.googleapis.com/v1/projects/worldarchitecture-ai/databases/(default)/documents/`. Requires an Firebase ID token from a logged-in user.
+Firebase Firestore has a REST API at `https://firestore.googleapis.com/v1/projects/<your-firebase-project-id>/databases/(default)/documents/`. Requires an Firebase ID token from a logged-in user.
 
 ### Option 3: browserclaw with Firebase auth injection (needs implementation)
 

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+#
+# Per-repo pre-commit hook: enforce example credential discipline
+# before any commit lands. Chains the user-global identity guard
+# (blocks @example.com author/committer) and runs the discipline
+# test on any staged examples/** files.
+#
+# Two-layer enforcement:
+#   1. Identity guard: ~/.claude/hooks/pre-commit-git-identity-example-com-guard.sh
+#      Blocks commits where author OR committer email ends in @example.com.
+#      This is the upstream-most guard; it fires before we even look at content.
+#   2. Content guard: tests/test_example_placeholder_discipline.sh
+#      Scans staged examples/** files for real production values.
+#
+# The hook is idempotent: re-running it on a clean tree is a no-op.
+#
+# Install:
+#   bash scripts/install-hooks.sh
+#
+# Skip (DANGEROUS — only for emergency hot-fixes):
+#   git commit --no-verify
+set -euo pipefail
+
+REPO_DIR="$(git rev-parse --show-toplevel)"
+
+echo "=== pre-commit: example credential discipline ==="
+
+# 1. Identity guard — chain the global hook if it exists
+GLOBAL_IDENTITY_GUARD="$HOME/.claude/hooks/pre-commit-git-identity-example-com-guard.sh"
+if [[ -x "$GLOBAL_IDENTITY_GUARD" ]]; then
+  echo "[1/2] Running global identity guard: $GLOBAL_IDENTITY_GUARD"
+  "$GLOBAL_IDENTITY_GUARD"
+else
+  echo "[1/2] WARN: global identity guard not found at $GLOBAL_IDENTITY_GUARD"
+  echo "       (continuing — content guard still active)"
+fi
+
+# 2. Content guard — run discipline test on staged examples/** files
+#
+# Scan the STAGED INDEX, not the working tree. A real-world leak
+# pattern is: developer stages a file with a secret, then edits the
+# worktree copy to redact it but forgets to `git add` again — the
+# commit still contains the secret but the worktree looks clean.
+# `git show :<path>` reads the staged content regardless of
+# worktree state, so this hook catches that class.
+echo "[2/2] Scanning staged examples/** for real production values..."
+STAGED_EXAMPLES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)examples/' || true)
+
+if [[ -z "$STAGED_EXAMPLES" ]]; then
+  echo "       no staged examples/** files — skipping content scan"
+  echo ""
+  echo "=== pre-commit: PASS ==="
+  exit 0
+fi
+
+# Materialize each staged example's content into a temp dir using
+# `git show :<path>` (reads the staged blob, NOT the worktree file).
+# This is the staged-index scan codex flagged as required: the
+# previous version scanned the worktree, which is bypassed by the
+# edit-then-forget-to-add pattern.
+STAGED_TMPDIR="$(mktemp -d -t precommit-examples-XXXXXX)"
+trap 'rm -rf "$STAGED_TMPDIR"' EXIT
+
+STAGED_FILE_LIST=()
+while IFS= read -r STAGED_PATH; do
+  [[ -z "$STAGED_PATH" ]] && continue
+  # Mirror the staged path under the temp dir
+  DEST="$STAGED_TMPDIR/$STAGED_PATH"
+  mkdir -p "$(dirname "$DEST")"
+  if git show ":$STAGED_PATH" > "$DEST" 2>/dev/null; then
+    STAGED_FILE_LIST+=("$DEST")
+  else
+    echo "       WARN: could not extract staged content for $STAGED_PATH"
+  fi
+done <<< "$STAGED_EXAMPLES"
+
+if [[ ${#STAGED_FILE_LIST[@]} -eq 0 ]]; then
+  echo "       no staged example content could be extracted — skipping"
+  echo ""
+  echo "=== pre-commit: PASS ==="
+  exit 0
+fi
+
+# Run the discipline test against the materialized staged content.
+DISCIPLINE_TEST="$REPO_DIR/tests/test_example_placeholder_discipline.sh"
+if [[ -x "$DISCIPLINE_TEST" ]]; then
+  if bash "$DISCIPLINE_TEST" --files "${STAGED_FILE_LIST[@]}"; then
+    echo ""
+    echo "=== pre-commit: PASS ==="
+    exit 0
+  else
+    echo ""
+    echo "=== pre-commit: FAIL — staged examples/** contains real production values ==="
+    echo ""
+    echo "Remediation:"
+    echo "  bash scripts/redact-examples.sh --apply    # auto-replace, then re-add"
+    echo "  Or manually: replace real values with <your-...> placeholders, then git add"
+    echo "  See ~/.claude/CLAUDE.md 'Example / seed / test fixture credential discipline'"
+    echo ""
+    echo "  To skip this check (DANGEROUS): git commit --no-verify"
+    exit 1
+  fi
+else
+  echo "       WARN: discipline test not found at $DISCIPLINE_TEST"
+  echo "       (cannot enforce content guard — commit proceeds without content scan)"
+  echo ""
+  echo "=== pre-commit: PASS (content guard unavailable) ==="
+  exit 0
+fi
