@@ -111,17 +111,17 @@ example_curl: |
     -H "Authorization: Bearer $TOKEN"
 
   # Get campaign detail
-  curl -s -X GET "$BASE/api/campaigns/cntvDfj7cGUhUFkxcmV3?story_limit=300" \
+  curl -s -X GET "$BASE/api/campaigns/<your-campaign-id>?story_limit=300" \
     -H "Authorization: Bearer $TOKEN"
 
   # Send interaction (non-streaming)
-  curl -s -X POST "$BASE/api/campaigns/cntvDfj7cGUhUFkxcmV3/interaction" \
+  curl -s -X POST "$BASE/api/campaigns/<your-campaign-id>/interaction" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"user_input":"I attack the goblin with my sword","mode":"god","stream":false}'
 
   # Streaming SSE
-  curl -s -N -X POST "$BASE/api/campaigns/cntvDfj7cGUhUFkxcmV3/interaction?stream=true" \
+  curl -s -N -X POST "$BASE/api/campaigns/<your-campaign-id>/interaction?stream=true" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"user_input":"I attack the goblin","mode":"god"}'

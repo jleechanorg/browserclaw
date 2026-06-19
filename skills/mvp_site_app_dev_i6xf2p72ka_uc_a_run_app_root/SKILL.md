@@ -27,42 +27,42 @@ For Firebase/JWT sites: use superpower chrome's `window.fetchApi()` which attach
 [
   {
     "created_at": "2026-04-14T03:48:48.615069+00:00",
-    "id": "cntvDfj7cGUhUFkxcmV3",
+    "id": "<your-campaign-id-1>",
     "initial_prompt": "Character: Aric the Fighter (Level 5) | Setting: A dark dungeon with torchlight | Description: Same-...",
     "last_played": "2026-04-14T03:50:40.282558+00:00",
     "title": "Same Size Test 1776138519"
   },
   {
     "created_at": "2026-04-14T03:26:58.113332+00:00",
-    "id": "L5iB5eWq8TyzQW3qFDDv",
+    "id": "<your-campaign-id-2>",
     "initial_prompt": "Character: Aric the Fighter (Level 5) | Setting: A dark dungeon with torchlight | Description: Same-...",
     "last_played": "2026-04-14T03:50:12.349758+00:00",
     "title": "Same Size Test 1776137125"
   },
   {
     "created_at": "2026-04-14T03:19:54.362303+00:00",
-    "id": "z7eDk3NzY1mB6BTm23yu",
+    "id": "<your-campaign-id-3>",
     "initial_prompt": "Character: Aric the Fighter (Level 5) | Setting: A dark dungeon with torchlight | Description: Same-...",
     "last_played": "2026-04-14T03:46:19.030851+00:00",
     "title": "Same Size Test 1776136773"
   },
   {
     "created_at": "2026-04-14T03:32:48.030641+00:00",
-    "id": "Z2sEA1hQW3YJbyQHvvt6",
+    "id": "<your-campaign-id-4>",
     "initial_prompt": "Character: Aric the Fighter (Level 5) | Setting: A dark dungeon with torchlight | Description: Same-...",
     "last_played": "2026-04-14T03:34:04.293029+00:00",
     "title": "Same Size Test 1776137520"
   },
   {
     "created_at": "2026-04-14T03:28:50.785347+00:00",
-    "id": "XHWCpllzfKNgwf6o1Jvc",
+    "id": "<your-campaign-id-5>",
     "initial_prompt": "Character: Aric the Fighter (Level 5) | Setting: A dark dungeon with torchlight | Description: Same-...",
     "last_played": "2026-04-14T03:33:37.986261+00:00",
     "title": "Same Size Test 1776137287"
   },
   {
     "created_at": "2026-04-14T03:22:39.855096+00:00",
-    "id": "zheWLda5wsDVQTdXrRFm",
+    "id": "<your-campaign-id-6>",
     "initial_prompt": "Character: Aric the Fighter (Level 5) | Setting: A dark dungeon with torchlight | Description: Same-...",
     "last_played": "2026-04-14T03:25:47.826426+00:00",
     "title": "Same Size Test 1776136922"
