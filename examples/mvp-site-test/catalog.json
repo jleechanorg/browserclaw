@@ -4,13 +4,13 @@
   "notes": [
     "Complete API catalog from JS bundle analysis + authenticated HTTP capture.",
     "Auth: Firebase Bearer token (JWT from firebase.auth().currentUser.getIdToken())",
-    "Token expires ~24h. Session: jleechantest@gmail.com (uid: 0wf6sCREyLcgynidU5LjyZEfm7D2)",
-    "Firebase project: worldarchitecture-ai (Google Cloud Firestore + Identity Toolkit)"
+    "Token expires ~24h. Session: <your-test-user>@example.com (uid: <your-firebase-uid>)",
+    "Firebase project: <your-firebase-project-id> (Google Cloud Firestore + Identity Toolkit)"
   ],
   "firebase_config": {
-    "apiKey": "AIzaSyARs7IekRptvhZIwtV7lwJh3axWFsn_4c8",
-    "authDomain": "worldarchitecture-ai.firebaseapp.com",
-    "projectId": "worldarchitecture-ai"
+    "apiKey": "<your-firebase-api-key>",
+    "authDomain": "<your-project>.firebaseapp.com",
+    "projectId": "<your-firebase-project-id>"
   },
   "endpoints": [
     {
@@ -49,7 +49,7 @@
       "path_params": ["campaign_id"],
       "query_params": ["story_limit (int, default=300)"],
       "response_fields": ["campaign", "game_state", "story", "story_pagination", "rewards_box", "planning_block"],
-      "curl": "curl -s -X GET 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/cntvDfj7cGUhUFkxcmV3?story_limit=300' \\\n  -H 'Authorization: Bearer <TOKEN>'"
+      "curl": "curl -s -X GET 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/<your-campaign-id>?story_limit=300' \\\n  -H 'Authorization: Bearer <TOKEN>'"
     },
     {
       "name": "get_story",
@@ -60,7 +60,7 @@
       "path_params": ["campaign_id"],
       "query_params": ["story_limit (int, default=100)"],
       "response_fields": ["story[actor,text,mode,sequence_id,id]", "pagination[total_count,fetched_count,has_older,oldest_id]"],
-      "curl": "curl -s -X GET 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/cntvDfj7cGUhUFkxcmV3/story?story_limit=100' \\\n  -H 'Authorization: Bearer <TOKEN>'"
+      "curl": "curl -s -X GET 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/<your-campaign-id>/story?story_limit=100' \\\n  -H 'Authorization: Bearer <TOKEN>'"
     },
     {
       "name": "export_campaign",
@@ -70,7 +70,7 @@
       "description": "Full campaign export as formatted God Mode text",
       "path_params": ["campaign_id"],
       "response": "Plain text narrative",
-      "curl": "curl -s -X GET 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/cntvDfj7cGUhUFkxcmV3/export' \\\n  -H 'Authorization: Bearer <TOKEN>'"
+      "curl": "curl -s -X GET 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/<your-campaign-id>/export' \\\n  -H 'Authorization: Bearer <TOKEN>'"
     },
     {
       "name": "send_interaction",
@@ -85,7 +85,7 @@
         "stream": "boolean (default: false)"
       },
       "response_fields": ["story", "game_state", "rewards_box", "error"],
-      "curl": "curl -s -X POST 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/cntvDfj7cGUhUFkxcmV3/interaction' \\\n  -H 'Authorization: Bearer <TOKEN>' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"user_input\":\"I attack the goblin with my sword\",\"mode\":\"god\",\"stream\":false}'"
+      "curl": "curl -s -X POST 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/<your-campaign-id>/interaction' \\\n  -H 'Authorization: Bearer <TOKEN>' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"user_input\":\"I attack the goblin with my sword\",\"mode\":\"god\",\"stream\":false}'"
     },
     {
       "name": "stream_interaction",
@@ -99,15 +99,15 @@
         "mode": "string (required) — god|char|think"
       },
       "response": "SSE stream of delta story entries",
-      "curl": "curl -s -N -X POST 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/cntvDfj7cGUhUFkxcmV3/interaction?stream=true' \\\n  -H 'Authorization: Bearer <TOKEN>' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"user_input\":\"I attack the goblin\",\"mode\":\"god\"}'"
+      "curl": "curl -s -N -X POST 'https://mvp-site-app-dev-i6xf2p72ka-uc.a.run.app/api/campaigns/<your-campaign-id>/interaction?stream=true' \\\n  -H 'Authorization: Bearer <TOKEN>' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"user_input\":\"I attack the goblin\",\"mode\":\"god\"}'"
     }
   ],
   "known_campaign_ids": [
-    "cntvDfj7cGUhUFkxcmV3",
-    "L5iB5eWq8TyzQW3qFDDv",
-    "z7eDk3NzY1mB6BTm23yu",
-    "Z2sEA1hQW3YJbyQHvvt6",
-    "XHWCpllzfKNgwf6o1Jvc"
+    "<your-campaign-id-1>",
+    "<your-campaign-id-2>",
+    "<your-campaign-id-3>",
+    "<your-campaign-id-4>",
+    "<your-campaign-id-5>"
   ],
   "notes_on_firebase": [
     "Game state also flows over Firebase Firestore WebSocket (real-time, not HTTP).",
