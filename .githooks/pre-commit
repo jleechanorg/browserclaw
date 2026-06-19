@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+#
+# Browserclaw pre-commit hook. Chains:
+# 1. The global identity guard at ~/.claude/hooks/pre-commit-git-identity-example-com-guard.sh
+#    (blocks commits authored by @example.com — recurring leak pattern)
+# 2. The example credential discipline test (only when examples/** files are staged)
+#
+# Install via:
+#   bash scripts/install-hooks.sh
+# (or `git config core.hooksPath .githooks` manually)
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# 1. Global identity guard
+GLOBAL_GUARD="$HOME/.claude/hooks/pre-commit-git-identity-example-com-guard.sh"
+if [[ -x "$GLOBAL_GUARD" ]]; then
+  if ! HERMES_SKIP_EXAMPLE_COM_GUARD=0 "$GLOBAL_GUARD"; then
+    echo "❌ Identity guard rejected the commit (blocker)"
+    exit 1
+  fi
+else
+  echo "⚠️  Global identity guard not found: $GLOBAL_GUARD"
+  echo "   Install with: mkdir -p ~/.claude/hooks && ensure the file exists"
+  echo "   Skipping identity check for this commit (NOT RECOMMENDED)"
+fi
+
+# 2. Example credential discipline test (only if examples/** files are staged)
+STAGED_EXAMPLES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^examples/' || true)
+if [[ -n "$STAGED_EXAMPLES" ]]; then
+  echo "=== Pre-commit: example credential discipline (staged: $(echo "$STAGED_EXAMPLES" | wc -l | tr -d ' ') examples/** file(s)) ==="
+  DISCIPLINE_TEST="$REPO_ROOT/tests/test_example_placeholder_discipline.sh"
+  if [[ -x "$DISCIPLINE_TEST" ]]; then
+    if ! "$DISCIPLINE_TEST"; then
+      echo "❌ Example credential discipline test failed (blocker)"
+      echo "   Fix the real values in your staged examples/** files, then re-stage and commit"
+      echo "   Or run: bash scripts/redact-examples.sh"
+      exit 1
+    fi
+  else
+    echo "⚠️  Discipline test not found or not executable: $DISCIPLINE_TEST"
+    echo "   chmod +x tests/test_example_placeholder_discipline.sh"
+  fi
+fi
+
+exit 0

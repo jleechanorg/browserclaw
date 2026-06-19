@@ -1,0 +1,55 @@
+# .gitleaks.toml — gitleaks configuration
+#
+# This config is in addition to the global gitleaks rules. It
+# specifically targets the "real production values in examples/**"
+# leak class that produced commits 3aac8fe8 (jleechanclaw) and
+# 45836c8 (browserclaw, this repo).
+#
+# Rules here ONLY fire on files under examples/. The redact script
+# (scripts/redact-examples.sh) contains the same patterns as literal
+# strings to substitute — by scoping the rules to examples/, we
+# avoid self-flagging the discipline tooling itself.
+#
+# These rules are NOT suppressible by .gitleaksignore (which is
+# reserved for historical commits, not new ones).
+
+title = "browserclaw gitleaks config (example/credential discipline)"
+
+[extend]
+# Use the default gitleaks ruleset as the base
+useDefault = true
+
+[[rules]]
+id = "examples-firebase-api-key"
+description = "Firebase API key in examples/** path (must use <your-firebase-api-key> placeholder)"
+regex = '''AIza[A-Za-z0-9_-]{35}'''
+tags = ["key", "firebase", "examples"]
+path = '''^examples/'''
+
+[[rules]]
+id = "examples-test-user-uid"
+description = "Firebase UID in examples/** path (must use <your-firebase-uid> placeholder)"
+regex = '''0wf6sCREyLcgynidU5LjyZEfm7D2'''
+tags = ["uid", "firebase", "examples"]
+path = '''^examples/'''
+
+[[rules]]
+id = "examples-test-user-email"
+description = "Test user email in examples/** path (must use <your-test-user>@example.com placeholder)"
+regex = '''jleechantest@gmail\.com'''
+tags = ["email", "examples"]
+path = '''^examples/'''
+
+[[rules]]
+id = "examples-gcp-project-id"
+description = "GCP project ID in examples/** path (must use <your-firebase-project-id> placeholder)"
+regex = '''worldarchitecture-ai|worldai-prod-c4977'''
+tags = ["project-id", "gcp", "examples"]
+path = '''^examples/'''
+
+[[rules]]
+id = "examples-campaign-id"
+description = "Production campaign ID in examples/** path (must use <your-campaign-id> placeholder)"
+regex = '''cntvDfj7cGUhUFkxcmV3|L5iB5eWq8TyzQW3qFDDv|z7eDk3NzY1mB6BTm23yu|Z2sEA1hQW3YJbyQHvvt6|XHWCpllzfKNgwf6o1Jvc|zheWLda5wsDVQTdXrRFm'''
+tags = ["campaign-id", "examples"]
+path = '''^examples/'''
