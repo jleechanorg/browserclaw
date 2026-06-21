@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -60,15 +61,17 @@ class _CdpHarCapture:
         self._finished.add(event["requestId"])
 
     async def _fetch_bodies(self):
-        for rid in list(self._finished):
+        async def _fetch_one(rid: str) -> None:
             if rid not in self._responses:
-                continue
+                return
             try:
                 result = await self.cdp.send("Network.getResponseBody", {"requestId": rid})
                 self._responses[rid]["body"] = result.get("body", "")
                 self._responses[rid]["base64Encoded"] = result.get("base64Encoded", False)
             except Exception:
                 pass
+
+        await asyncio.gather(*(_fetch_one(rid) for rid in self._finished))
 
     async def flush(self, output: Path) -> None:
         await self._fetch_bodies()
@@ -86,8 +89,13 @@ class _CdpHarCapture:
             }
             if base64_encoded:
                 content["encoding"] = "base64"
+            ts = req.get("timestamp", 0)
+            started_dt = (
+                datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                if ts else datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            )
             entry: dict = {
-                "startedDateTime": "",
+                "startedDateTime": started_dt,
                 "time": 0,
                 "request": {
                     "method": req["method"],
@@ -113,7 +121,7 @@ class _CdpHarCapture:
                 "timings": {"send": 0, "wait": 0, "receive": 0},
             }
             if req.get("postData"):
-                ct = req["headers"].get("content-type", req["headers"].get("Content-Type", ""))
+                ct = next((v for k, v in req["headers"].items() if k.lower() == "content-type"), "")
                 entry["request"]["postData"] = {"mimeType": ct, "text": req["postData"]}
             entries.append(entry)
 

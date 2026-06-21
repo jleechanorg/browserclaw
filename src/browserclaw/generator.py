@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 from .models import EndpointCatalog
@@ -484,8 +485,11 @@ def render_curl_replay(har_path: str | Path) -> str:
             safe_value = value.replace("'", "'\\''")
             curl_parts.append(f"  -H '{name}: {safe_value}'")
 
-        if post_data.get("text"):
-            safe_body = post_data["text"].replace("'", "'\\''")
+        body_text = post_data.get("text") or ""
+        if not body_text and post_data.get("params"):
+            body_text = urlencode([(p.get("name", ""), p.get("value", "")) for p in post_data["params"]])
+        if body_text:
+            safe_body = body_text.replace("'", "'\\''")
             curl_parts.append(f"  --data-raw '{safe_body}'")
 
         safe_url = url.replace("'", "'\\''")
