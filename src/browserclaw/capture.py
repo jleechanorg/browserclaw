@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -14,6 +15,125 @@ from .models import (
     WebSocketFrame,
     parse_firestore_message,
 )
+
+
+class _CdpHarCapture:
+    """Collect full HTTP request/response data via CDP Network domain.
+
+    Used when superpower chrome is connected and Playwright's own HAR recording
+    is unavailable. Writes a standard HAR 1.2 file on flush().
+    """
+
+    def __init__(self, cdp):
+        self.cdp = cdp
+        self._requests: dict[str, dict] = {}
+        self._responses: dict[str, dict] = {}
+        self._finished: set[str] = set()
+
+    async def enable(self):
+        await self.cdp.send("Network.enable")
+        self.cdp.on("Network.requestWillBeSent", self._on_request)
+        self.cdp.on("Network.responseReceived", self._on_response)
+        self.cdp.on("Network.loadingFinished", self._on_finished)
+
+    def _on_request(self, event):
+        rid = event["requestId"]
+        req = event.get("request", {})
+        self._requests[rid] = {
+            "method": req.get("method", "GET"),
+            "url": req.get("url", ""),
+            "headers": req.get("headers", {}),
+            "postData": req.get("postData"),
+            "timestamp": event.get("timestamp", 0),
+        }
+
+    def _on_response(self, event):
+        rid = event["requestId"]
+        resp = event.get("response", {})
+        self._responses[rid] = {
+            "status": resp.get("status", 0),
+            "statusText": resp.get("statusText", ""),
+            "headers": resp.get("headers", {}),
+            "mimeType": resp.get("mimeType", ""),
+        }
+
+    def _on_finished(self, event):
+        self._finished.add(event["requestId"])
+
+    async def _fetch_bodies(self):
+        async def _fetch_one(rid: str) -> None:
+            if rid not in self._responses:
+                return
+            try:
+                result = await self.cdp.send("Network.getResponseBody", {"requestId": rid})
+                self._responses[rid]["body"] = result.get("body", "")
+                self._responses[rid]["base64Encoded"] = result.get("base64Encoded", False)
+            except Exception:
+                pass
+
+        await asyncio.gather(*(_fetch_one(rid) for rid in self._finished))
+
+    async def flush(self, output: Path) -> None:
+        await self._fetch_bodies()
+        entries = []
+        for rid, req in self._requests.items():
+            resp = self._responses.get(rid, {})
+            req_headers = [{"name": k, "value": v} for k, v in req["headers"].items()]
+            resp_headers = [{"name": k, "value": v} for k, v in resp.get("headers", {}).items()]
+            body = resp.get("body", "")
+            base64_encoded = resp.get("base64Encoded", False)
+            content: dict = {
+                "size": len(body) if body else 0,
+                "mimeType": resp.get("mimeType", "application/octet-stream"),
+                "text": body,
+            }
+            if base64_encoded:
+                content["encoding"] = "base64"
+            ts = req.get("timestamp", 0)
+            started_dt = (
+                datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                if ts else datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            )
+            entry: dict = {
+                "startedDateTime": started_dt,
+                "time": 0,
+                "request": {
+                    "method": req["method"],
+                    "url": req["url"],
+                    "httpVersion": "HTTP/1.1",
+                    "headers": req_headers,
+                    "queryString": [],
+                    "headersSize": -1,
+                    "bodySize": len(req.get("postData") or ""),
+                },
+                "response": {
+                    "status": resp.get("status", 0),
+                    "statusText": resp.get("statusText", ""),
+                    "httpVersion": "HTTP/1.1",
+                    "headers": resp_headers,
+                    "cookies": [],
+                    "content": content,
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": len(body) if body else 0,
+                },
+                "cache": {},
+                "timings": {"send": 0, "wait": 0, "receive": 0},
+            }
+            if req.get("postData"):
+                ct = next((v for k, v in req["headers"].items() if k.lower() == "content-type"), "")
+                entry["request"]["postData"] = {"mimeType": ct, "text": req["postData"]}
+            entries.append(entry)
+
+        har = {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "browserclaw-cdp", "version": "1.0"},
+                "entries": entries,
+            }
+        }
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(har, indent=2))
 
 
 async def _run_step(page: Page, step) -> None:
@@ -92,11 +212,12 @@ async def _capture(
             page = await context.new_page()
             _use_superpower = False
 
-        # Only enable HAR recording when NOT using superpower chrome
-        # (superpower chrome's CDP already captures network via its own proxy)
-        if not _use_superpower:
+        # When using superpower chrome, capture via CDP HAR recorder (no Playwright HAR)
+        cdp_har: _CdpHarCapture | None = None
+        if _use_superpower:
             cdp = await context.new_cdp_session(page)
-            await cdp.send("Network.enable")
+            cdp_har = _CdpHarCapture(cdp)
+            await cdp_har.enable()
 
         await page.goto(url, wait_until="domcontentloaded")
 
@@ -112,6 +233,8 @@ async def _capture(
         else:
             await page.wait_for_timeout(wait_after_load * 1000)
 
+        if cdp_har is not None:
+            await cdp_har.flush(output)
         if not _use_superpower:
             await context.close()
         await browser.close()
