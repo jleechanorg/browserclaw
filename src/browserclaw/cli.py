@@ -297,6 +297,8 @@ def _detect_token_placeholders(har_path: str | Path | None) -> list[str]:
     )
     _COOKIE_TOKEN_NAMES = ("d", "session", "token", "auth", "jwt", "sid")
 
+    # These names match the env vars that render_curl_replay emits, so the
+    # mockset.json contract can be exported 1:1 as MOCKSET_TOKENS_<NAME>=...
     placeholders: set[str] = set()
     for entry in har.get("log", {}).get("entries", []):
         for header in entry.get("request", {}).get("headers", []):
@@ -304,7 +306,8 @@ def _detect_token_placeholders(har_path: str | Path | None) -> list[str]:
             value = header.get("value", "")
             for pattern in _TOKEN_HEADER_PATTERNS:
                 if pattern.match(name) and value and "<" not in value:
-                    placeholder = f"AUTHORIZATION_{name.upper().replace('-', '_')}"
+                    # e.g. "Authorization" → "AUTHORIZATION"
+                    placeholder = name.upper().replace("-", "_")
                     placeholders.add(placeholder)
                     break
         cookie_header = next(
@@ -323,6 +326,61 @@ def _detect_token_placeholders(har_path: str | Path | None) -> list[str]:
                 if cname.lower() in _COOKIE_TOKEN_NAMES:
                     placeholders.add(f"COOKIE_{cname.upper()}")
     return sorted(placeholders)
+
+
+def _redact_har(src: Path, dst: Path, placeholder_names: list[str]) -> None:
+    """Write a redacted copy of a HAR with token values replaced by placeholders.
+
+    For each known token header (Authorization, x-api-key, x-auth-token) and
+    each known token cookie (d, session, token, auth, jwt, sid), replace the
+    captured value with `$MOCKSET_TOKENS_<NAME>`. The structure of the HAR is
+    preserved so it remains parseable by downstream tools.
+    """
+    if not src.exists():
+        return
+    try:
+        har = json.loads(src.read_text())
+    except Exception:
+        return
+
+    placeholder_set = set(placeholder_names)
+    token_headers = {"authorization", "x-api-key", "x-auth-token", "api-key", "api_key"}
+    token_cookies = {"d", "session", "token", "auth", "jwt", "sid"}
+
+    for entry in har.get("log", {}).get("entries", []):
+        request = entry.get("request", {})
+        for header in request.get("headers", []):
+            name = header.get("name", "")
+            if name.lower() in token_headers:
+                placeholder = name.upper().replace("-", "_")
+                if placeholder in placeholder_set:
+                    header["value"] = f"$MOCKSET_TOKENS_{placeholder}"
+        cookie_header = next(
+            (
+                h for h in request.get("headers", [])
+                if h.get("name", "").lower() == "cookie"
+            ),
+            None,
+        )
+        if cookie_header:
+            rewritten: list[str] = []
+            for pair in cookie_header.get("value", "").split(";"):
+                pair = pair.strip()
+                if "=" not in pair:
+                    rewritten.append(pair)
+                    continue
+                cname, _cval = pair.split("=", 1)
+                if cname.strip().lower() in token_cookies:
+                    placeholder = f"COOKIE_{cname.strip().upper()}"
+                    if placeholder in placeholder_set:
+                        rewritten.append(
+                            f"{cname.strip()}=$MOCKSET_TOKENS_{placeholder}"
+                        )
+                        continue
+                rewritten.append(pair)
+            cookie_header["value"] = "; ".join(rewritten)
+
+    dst.write_text(json.dumps(har, indent=2) + "\n")
 
 
 def main() -> None:
@@ -571,14 +629,26 @@ def main() -> None:
             extra_headers=_parse_extra_headers(args.extra_headers),
         )
 
+        # Detect token placeholders BEFORE redaction so the contract is
+        # consistent with the redacted HAR. Then redact the HAR in place —
+        # raw tokens are replaced with $MOCKSET_TOKENS_<NAME> placeholders
+        # so the persisted capture.har is also token-safe to share.
+        token_placeholders = _detect_token_placeholders(har_path)
+        redacted_har_path = output_dir / "capture.redacted.har"
+        if har_path.exists():
+            _redact_har(har_path, redacted_har_path, token_placeholders)
+
         response_shapes: dict[str, dict] = {}
         try:
             response_shapes = capture_responses_superpower(args.url)
         except Exception:
             pass
 
-        if har_path.exists():
-            catalog = infer_endpoint_catalog(har_path, site=args.site)
+        # Use the redacted HAR for catalog inference so any URL/header-derived
+        # metadata (request_header_keys, query_keys) doesn't leak token names.
+        inference_har = redacted_har_path if redacted_har_path.exists() else har_path
+        if inference_har.exists():
+            catalog = infer_endpoint_catalog(inference_har, site=args.site)
         elif response_shapes:
             site = args.site or args.url.split("//")[1].split("/")[0]
             catalog = build_catalog_from_responses(site, response_shapes)
@@ -599,24 +669,30 @@ def main() -> None:
             output_dir,
             site_url=args.url,
             response_shapes=response_shapes,
-            har_path=har_path,
+            har_path=inference_har,
             dry_run=True,
         )
 
         # Write mockset.json — the replay contract
-        from .models import EndpointCatalog as _EC
         mockset_config = {
             "version": "1.0",
             "site": catalog.site,
             "source_url": args.url,
-            "har_path": str(har_path),
+            "har_path": str(redacted_har_path if redacted_har_path.exists() else har_path),
+            "raw_har_path": str(har_path),
             "catalog_path": str(catalog_path),
             "dry_run": True,
             "tokens": {
                 # Token placeholders are referenced by name; values come from
-                # MOCKSET_TOKENS env var or ~/.config/browserclaw/mockset-tokens.json
-                # at replay time. NEVER embedded in mockset.json itself.
-                "placeholders": _detect_token_placeholders(har_path),
+                # MOCKSET_TOKENS_<NAME> env var at replay time. NEVER embedded
+                # in mockset.json itself. Names match the placeholders in the
+                # generated curl_replay.sh and the redacted HAR.
+                "placeholders": token_placeholders,
+                "env_var_format": "MOCKSET_TOKENS_<NAME>=value",
+                "supply_via": [
+                    "export MOCKSET_TOKENS_AUTHORIZATION='Bearer <token>'",
+                    "export MOCKSET_TOKENS_COOKIE_D='<cookie-value>'",
+                ],
             },
             "endpoints": [
                 {
