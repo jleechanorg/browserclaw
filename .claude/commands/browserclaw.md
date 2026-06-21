@@ -21,6 +21,36 @@ Reverse-engineer browser APIs from an interactive browsing session.
 | `infer` | Parse HAR → Endpoint Catalog |
 | `generate` | Generate client code from catalog |
 | `generate-ws` | Generate WebSocket replay scripts |
+| `mockset` | `learn` in dry-run mode + write `mockset.json` for token-free replay |
+
+## Dry-run / mockset mode (token-safe reverse engineering)
+
+Use this when you want to capture HTTP traffic from an authenticated site
+**without ever writing tokens back to disk**. Two ways:
+
+```bash
+# Inline dry-run (uses learn pipeline, dry-run client + curl_replay.sh)
+browserclaw learn --url https://api.slack.com/apps/<app_id> \
+  --output-dir ./out --manual --dry-run
+
+# Full mockset (writes mockset.json — replay contract for later sessions)
+browserclaw mockset --url https://api.slack.com/apps/<app_id> \
+  --output-dir ./out --manual
+```
+
+In dry-run mode:
+- `generated_client.py` includes a `MockSetTokenMissingError` guard. The client
+  reads tokens from `$MOCKSET_TOKENS` (JSON) or
+  `~/.config/browserclaw/mockset-tokens.json` at call time.
+- `curl_replay.sh` references `$MOCKSET_TOKENS_AUTHORIZATION` and
+  `$MOCKSET_TOKENS_COOKIE_*` shell variables. The script `exit 2`s if any
+  required token is unset.
+- Tokens are **never embedded** in any generated file.
+
+**Why this exists**: secrets-from-`.env` is a recurring footgun (see the May
+2026 prod Slack invalid_auth incident in
+`~/roadmap/nextsteps-2026-05-11-hermes-slack-env-chain.md`). The mockset
+mode is the default-safe way to reverse-engineer any authenticated API.
 
 ## Behavior
 

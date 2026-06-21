@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -213,6 +214,42 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also capture screenshot and console logs to evidence/ subdirectory",
     )
+    learn_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Capture-only mode: do not write secrets into generated client code. "
+             "Tokens are referenced from $MOCKSET_TOKENS or environment, never embedded.",
+    )
+
+    # ── Mockset (capture into a replayable mock) ──────────────────────────────
+    mockset_parser = subparsers.add_parser(
+        "mockset",
+        help="Run learn in dry-run mode and write a mockset.json that subsequent "
+             "browserclaw sessions can replay against (no real network calls).",
+    )
+    mockset_parser.add_argument("--url", required=True)
+    mockset_parser.add_argument("--output-dir", required=True)
+    mockset_parser.add_argument("--browser-channel", default="chromium")
+    mockset_parser.add_argument("--storage-state")
+    mockset_parser.add_argument(
+        "--extra-headers",
+        nargs="*",
+        help="Extra HTTP headers as KEY=VALUE pairs",
+    )
+    mockset_parser.add_argument("--headless", action="store_true")
+    mockset_parser.add_argument("--manual", action="store_true")
+    mockset_parser.add_argument("--wait-after-load", type=float, default=15.0)
+    mockset_parser.add_argument("--steps")
+    mockset_parser.add_argument("--goal")
+    mockset_parser.add_argument("--provider", choices=["anthropic", "openai", "gemini"])
+    mockset_parser.add_argument("--model")
+    mockset_parser.add_argument("--site")
+    mockset_parser.add_argument("--skill-name")
+    mockset_parser.add_argument(
+        "--capture-evidence",
+        action="store_true",
+        help="Also capture screenshot and console logs to evidence/ subdirectory",
+    )
 
     return parser
 
@@ -234,6 +271,116 @@ def _parse_extra_headers(raw: list[str] | None) -> dict[str, str] | None:
             key, value = item.split("=", 1)
             result[key.strip()] = value.strip()
     return result or None
+
+
+def _detect_token_placeholders(har_path: str | Path | None) -> list[str]:
+    """Scan a HAR file for likely token headers/cookies and return placeholder names.
+
+    Used by `browserclaw mockset` so the generated mockset.json can declare
+    which tokens must be supplied at replay time. Never embeds actual values.
+    """
+    if not har_path:
+        return []
+    har_path = Path(har_path)
+    if not har_path.exists():
+        return []
+    try:
+        har = json.loads(har_path.read_text())
+    except Exception:
+        return []
+
+    _TOKEN_HEADER_PATTERNS = (
+        re.compile(r"^authorization$", re.IGNORECASE),
+        re.compile(r"^x-api-key$", re.IGNORECASE),
+        re.compile(r"^x-auth-token$", re.IGNORECASE),
+        re.compile(r"^api[_-]?key$", re.IGNORECASE),
+    )
+    _COOKIE_TOKEN_NAMES = ("d", "session", "token", "auth", "jwt", "sid")
+
+    # These names match the env vars that render_curl_replay emits, so the
+    # mockset.json contract can be exported 1:1 as MOCKSET_TOKENS_<NAME>=...
+    placeholders: set[str] = set()
+    for entry in har.get("log", {}).get("entries", []):
+        for header in entry.get("request", {}).get("headers", []):
+            name = header.get("name", "")
+            value = header.get("value", "")
+            for pattern in _TOKEN_HEADER_PATTERNS:
+                if pattern.match(name) and value and "<" not in value:
+                    # e.g. "Authorization" → "AUTHORIZATION"
+                    placeholder = name.upper().replace("-", "_")
+                    placeholders.add(placeholder)
+                    break
+        cookie_header = next(
+            (
+                h for h in entry.get("request", {}).get("headers", [])
+                if h.get("name", "").lower() == "cookie"
+            ),
+            None,
+        )
+        if cookie_header:
+            for pair in cookie_header.get("value", "").split(";"):
+                pair = pair.strip()
+                if "=" not in pair:
+                    continue
+                cname = pair.split("=", 1)[0].strip()
+                if cname.lower() in _COOKIE_TOKEN_NAMES:
+                    placeholders.add(f"COOKIE_{cname.upper()}")
+    return sorted(placeholders)
+
+
+def _redact_har(src: Path, dst: Path, placeholder_names: list[str]) -> None:
+    """Write a redacted copy of a HAR with token values replaced by placeholders.
+
+    For each known token header (Authorization, x-api-key, x-auth-token) and
+    each known token cookie (d, session, token, auth, jwt, sid), replace the
+    captured value with `$MOCKSET_TOKENS_<NAME>`. The structure of the HAR is
+    preserved so it remains parseable by downstream tools.
+    """
+    if not src.exists():
+        return
+    try:
+        har = json.loads(src.read_text())
+    except Exception:
+        return
+
+    placeholder_set = set(placeholder_names)
+    token_headers = {"authorization", "x-api-key", "x-auth-token", "api-key", "api_key"}
+    token_cookies = {"d", "session", "token", "auth", "jwt", "sid"}
+
+    for entry in har.get("log", {}).get("entries", []):
+        request = entry.get("request", {})
+        for header in request.get("headers", []):
+            name = header.get("name", "")
+            if name.lower() in token_headers:
+                placeholder = name.upper().replace("-", "_")
+                if placeholder in placeholder_set:
+                    header["value"] = f"$MOCKSET_TOKENS_{placeholder}"
+        cookie_header = next(
+            (
+                h for h in request.get("headers", [])
+                if h.get("name", "").lower() == "cookie"
+            ),
+            None,
+        )
+        if cookie_header:
+            rewritten: list[str] = []
+            for pair in cookie_header.get("value", "").split(";"):
+                pair = pair.strip()
+                if "=" not in pair:
+                    rewritten.append(pair)
+                    continue
+                cname, _cval = pair.split("=", 1)
+                if cname.strip().lower() in token_cookies:
+                    placeholder = f"COOKIE_{cname.strip().upper()}"
+                    if placeholder in placeholder_set:
+                        rewritten.append(
+                            f"{cname.strip()}=$MOCKSET_TOKENS_{placeholder}"
+                        )
+                        continue
+                rewritten.append(pair)
+            cookie_header["value"] = "; ".join(rewritten)
+
+    dst.write_text(json.dumps(har, indent=2) + "\n")
 
 
 def main() -> None:
@@ -349,7 +496,14 @@ def main() -> None:
             catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
         catalog_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
-        bundle = generate_bundle(catalog, output_dir, site_url=args.url, response_shapes=response_shapes)
+        bundle = generate_bundle(
+            catalog,
+            output_dir,
+            site_url=args.url,
+            response_shapes=response_shapes,
+            har_path=har_path,
+            dry_run=getattr(args, "dry_run", False),
+        )
 
         # Evidence capture (screenshot + console)
         if getattr(args, "capture_evidence", False):
@@ -453,6 +607,121 @@ def main() -> None:
             bundle.update({"ws": str(ws_path), "ws_replay": str(ws_bundle["replay"])})
 
         print(json.dumps({key: str(value) for key, value in bundle.items()}, indent=2))
+        return
+
+    if args.command == "mockset":
+        # mockset = learn in dry-run mode + write mockset.json replay config
+        output_dir = Path(args.output_dir)
+        har_path = output_dir / "capture.har"
+        catalog_path = output_dir / "catalog.json"
+        steps = _resolve_steps(args)
+        manual = False if args.headless else (args.manual or steps is None)
+
+        capture_har(
+            args.url,
+            har_path,
+            browser_channel=args.browser_channel,
+            headless=args.headless,
+            storage_state=args.storage_state,
+            manual=manual,
+            wait_after_load=args.wait_after_load,
+            steps=steps,
+            extra_headers=_parse_extra_headers(args.extra_headers),
+        )
+
+        # Detect token placeholders BEFORE redaction so the contract is
+        # consistent with the redacted HAR. Then redact the HAR in place —
+        # raw tokens are replaced with $MOCKSET_TOKENS_<NAME> placeholders
+        # so the persisted capture.har is also token-safe to share.
+        token_placeholders = _detect_token_placeholders(har_path)
+        redacted_har_path = output_dir / "capture.redacted.har"
+        if har_path.exists():
+            _redact_har(har_path, redacted_har_path, token_placeholders)
+
+        response_shapes: dict[str, dict] = {}
+        try:
+            response_shapes = capture_responses_superpower(args.url)
+        except Exception:
+            pass
+
+        # Use the redacted HAR for catalog inference so any URL/header-derived
+        # metadata (request_header_keys, query_keys) doesn't leak token names.
+        inference_har = redacted_har_path if redacted_har_path.exists() else har_path
+        if inference_har.exists():
+            catalog = infer_endpoint_catalog(inference_har, site=args.site)
+        elif response_shapes:
+            site = args.site or args.url.split("//")[1].split("/")[0]
+            catalog = build_catalog_from_responses(site, response_shapes)
+        else:
+            catalog = EndpointCatalog(
+                site=args.site or args.url,
+                source_har=None,
+                notes=["No HAR and no superpower chrome responses captured"],
+                endpoints=[],
+            )
+        if args.provider and args.model:
+            catalog = enrich_catalog(catalog, args.provider, args.model, goal=args.goal)
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text(json.dumps(catalog.to_dict(), indent=2) + "\n")
+        # Always dry-run for mockset — secrets are never embedded
+        bundle = generate_bundle(
+            catalog,
+            output_dir,
+            site_url=args.url,
+            response_shapes=response_shapes,
+            har_path=inference_har,
+            dry_run=True,
+        )
+
+        # Write mockset.json — the replay contract
+        mockset_config = {
+            "version": "1.0",
+            "site": catalog.site,
+            "source_url": args.url,
+            "har_path": str(redacted_har_path if redacted_har_path.exists() else har_path),
+            "raw_har_path": str(har_path),
+            "catalog_path": str(catalog_path),
+            "dry_run": True,
+            "tokens": {
+                # Token placeholders are referenced by name; values come from
+                # MOCKSET_TOKENS_<NAME> env var at replay time. NEVER embedded
+                # in mockset.json itself. Names match the placeholders in the
+                # generated curl_replay.sh and the redacted HAR.
+                "placeholders": token_placeholders,
+                "env_var_format": "MOCKSET_TOKENS_<NAME>=value",
+                "supply_via": [
+                    "export MOCKSET_TOKENS_AUTHORIZATION='Bearer <token>'",
+                    "export MOCKSET_TOKENS_COOKIE_D='<cookie-value>'",
+                ],
+            },
+            "endpoints": [
+                {
+                    "method": e.method,
+                    "url_template": e.url_template,
+                    "name": e.name,
+                    "sample_status_codes": list(e.sample_status_codes),
+                    "sample_content_types": list(e.sample_content_types),
+                }
+                for e in catalog.endpoints
+            ],
+            "generated_files": {key: str(value) for key, value in bundle.items()},
+        }
+        mockset_path = output_dir / "mockset.json"
+        mockset_path.write_text(json.dumps(mockset_config, indent=2) + "\n")
+
+        if getattr(args, "capture_evidence", False):
+            try:
+                evidence_dir = capture_evidence(
+                    args.url,
+                    output_dir,
+                    browser_channel=args.browser_channel,
+                    headless=args.headless,
+                )
+                mockset_config["evidence"] = str(evidence_dir)
+            except Exception:
+                pass
+
+        print(json.dumps({"mockset": str(mockset_path), **mockset_config}, indent=2))
         return
 
     parser.error(f"Unhandled command: {args.command}")
