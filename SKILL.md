@@ -8,6 +8,10 @@ agent_scope: Any AI agent (Codex, Claude Code, OpenClaw, Hermes, AO)
 
 Inspect browser-driven API traffic and convert captured patterns into reusable artifacts — a Python client for programmatic control and MCP tool definitions for tool-calling agents.
 
+## Scope
+
+**Any public website** — not limited to "the app" or "the auth handshake." browserclaw captures traffic from any URL you can reach in Chrome/Chromium. The "no login bypass" rule is about authentication (don't bypass logins/CAPTCHAs), NOT about which sites you can browse. For sites where you're already authenticated in Chrome, use `--storage-state` (or `browserclaw cookies decrypt --db <chrome-cookies-db>` + `browserclaw cookies inject --cookies <out.json>`) to reuse your existing session cookies. This works for any site where Chrome has cookies: GCP Console, Slack, GitHub, Firebase Console, etc.
+
 ## What it does
 
 1. **Capture** — Playwright + Chromium records HTTP traffic to a HAR file
