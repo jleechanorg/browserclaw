@@ -110,6 +110,12 @@ class Cookie:
         # we have no domain and no host_only, fall back to url construction.
         if self.host_only:
             cookie.pop("domain", None)
+            # Playwright rejects cookies that have BOTH ``url`` and ``path``
+            # (see playwright/driver/package/lib/server/network.js rewriteCookies:
+            # ``assert(!(c.url && c.path), "Cookie should have either url or path")``).
+            # Since ``url`` already encodes the path, drop ``path`` to keep the
+            # payload valid. Path info is preserved inside the URL itself.
+            cookie.pop("path", None)
             # Build a URL origin that matches the host. If host looks like a
             # plain hostname (no scheme), prefix https:// for storage_state.
             host = self.domain if self.domain else ""

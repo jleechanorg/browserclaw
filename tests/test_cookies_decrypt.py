@@ -316,6 +316,39 @@ def test_to_playwright_host_only_cookie_not_widened():
     assert pw["sameSite"] == "Lax"
 
 
+def test_to_playwright_host_only_cookie_drops_path():
+    """Regression: host-only cookies must NOT carry both ``url`` and ``path``.
+
+    Playwright's ``BrowserContext.add_cookies`` rejects any cookie that has
+    both attributes via the assertion in
+    ``playwright/driver/package/lib/server/network.js rewriteCookies``:
+    ``Cookie should have either url or path``. When a Chrome host-only cookie
+    is converted to Playwright form (url + dropped domain), the path attribute
+    must also be dropped, otherwise the whole cookies payload is rejected.
+    """
+    c = Cookie(
+        name="OSID", value="abc", domain="accounts.google.com", path="/",
+        expires=1816381051, secure=True, httpOnly=True, sameSite="Lax",
+        host_only=True,
+    )
+    pw = c.to_playwright()
+    assert "domain" not in pw
+    assert "path" not in pw, (
+        "host-only cookie has both url and path; Playwright will reject the "
+        "entire add_cookies() call with 'Cookie should have either url or path'"
+    )
+    assert pw["url"] == "https://accounts.google.com/"
+    # Deep nested paths also drop cleanly
+    c2 = Cookie(
+        name="x", value="y", domain="api.example.com", path="/v1/users",
+        expires=-1, secure=True, httpOnly=False, sameSite="Strict",
+        host_only=True,
+    )
+    pw2 = c2.to_playwright()
+    assert "path" not in pw2
+    assert pw2["url"] == "https://api.example.com/v1/users"
+
+
 def test_to_playwright_rejects_invalid_samesite():
     c = Cookie(
         name="x", value="y", domain="x.com", path="/",
