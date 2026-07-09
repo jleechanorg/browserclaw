@@ -471,6 +471,13 @@ def main() -> None:
             extra_headers=_parse_extra_headers(args.extra_headers),
         )
 
+        if getattr(args, "dry_run", False) and har_path.exists():
+            token_placeholders = _detect_token_placeholders(har_path)
+            redacted_har_path = output_dir / "capture.redacted.har"
+            _redact_har(har_path, redacted_har_path, token_placeholders)
+            if redacted_har_path.exists():
+                shutil.move(str(redacted_har_path), str(har_path))
+
         # Superpower chrome response capture (fills in response shapes HAR missed)
         response_shapes: dict[str, dict] = {}
         try:
@@ -637,6 +644,7 @@ def main() -> None:
         redacted_har_path = output_dir / "capture.redacted.har"
         if har_path.exists():
             _redact_har(har_path, redacted_har_path, token_placeholders)
+            har_path.unlink()
 
         response_shapes: dict[str, dict] = {}
         try:
@@ -678,8 +686,7 @@ def main() -> None:
             "version": "1.0",
             "site": catalog.site,
             "source_url": args.url,
-            "har_path": str(redacted_har_path if redacted_har_path.exists() else har_path),
-            "raw_har_path": str(har_path),
+            "har_path": str(redacted_har_path),
             "catalog_path": str(catalog_path),
             "dry_run": True,
             "tokens": {

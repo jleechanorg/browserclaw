@@ -26,6 +26,7 @@ References:
 from __future__ import annotations
 
 import json
+import platform
 import shutil
 import sqlite3
 import subprocess
@@ -33,6 +34,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -46,10 +48,11 @@ DEFAULT_KEYCHAIN_SERVICE = "Chrome Safe Storage"
 DEFAULT_KEYCHAIN_ACCOUNT = "Chrome"
 
 # PBKDF2 parameters. macOS uses 1003 iterations and the literal salt "saltysalt".
-# Linux Chromium uses 1 iteration and salt "peanuts" — see LinuxKeyStorage in
-# os_crypt_sync_linux.cc. This module currently targets macOS only.
+# Linux Chrome also uses "saltysalt" for Safe Storage AES-CBC cookies, but with
+# a single PBKDF2 iteration.
 PBKDF2_SALT = b"saltysalt"
 PBKDF2_ITERATIONS = 1003
+LINUX_PBKDF2_ITERATIONS = 1
 PBKDF2_KEY_LEN = 16  # AES-128
 
 # CBC IV is 16 spaces. Hard-coded in Chromium's encryption.cc Encryptor::Encrypt.
@@ -110,6 +113,7 @@ class Cookie:
         # we have no domain and no host_only, fall back to url construction.
         if self.host_only:
             cookie.pop("domain", None)
+            cookie.pop("path", None)
             # Build a URL origin that matches the host. If host looks like a
             # plain hostname (no scheme), prefix https:// for storage_state.
             host = self.domain if self.domain else ""
@@ -156,17 +160,48 @@ def keychain_password(
     return out
 
 
-def derive_aes_key(password: bytes) -> bytes:
+def linux_secret_storage_password(service: str = DEFAULT_KEYCHAIN_SERVICE) -> bytes:
+    """Pull Chrome's Safe Storage password from Linux Secret Service.
+
+    Google Chrome on Linux stores its OSCrypt password in the user's Secret
+    Service collection under the ``Chrome Safe Storage`` label. The optional
+    ``secretstorage`` dependency is already used by BrowserClaw's cookie tools
+    when available; raise ``CookieDecryptError`` with actionable text otherwise.
+    """
+    try:
+        import secretstorage
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise CookieDecryptError(
+            "Linux Secret Service lookup requires the 'secretstorage' package"
+        ) from exc
+
+    try:
+        bus = secretstorage.dbus_init()
+        collection = secretstorage.get_default_collection(bus)
+        for item in collection.get_all_items():
+            attrs = item.get_attributes()
+            label = item.get_label()
+            if label == service or attrs.get("application") == "chrome":
+                secret = item.get_secret()
+                if secret:
+                    return secret
+    except Exception as exc:  # pragma: no cover - depends on DBus/keyring
+        raise CookieDecryptError(f"Linux Secret Service lookup failed: {exc}") from exc
+
+    raise CookieDecryptError(f"Linux Secret Service item not found for service={service!r}")
+
+
+def derive_aes_key(password: bytes, *, iterations: int = PBKDF2_ITERATIONS, length: int = PBKDF2_KEY_LEN) -> bytes:
     """Derive the 16-byte AES-128 key from a Chrome Safe Storage password.
 
-    PBKDF2-HMAC-SHA1, salt="saltysalt", iterations=1003, dkLen=16.
-    This matches Chromium's macOS OSCrypt implementation (see os_crypt_mac.mm).
+    PBKDF2-HMAC-SHA1, salt="saltysalt", dkLen=16. macOS uses 1003 iterations;
+    Linux Chrome Safe Storage AES-CBC cookies use one iteration.
     """
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA1(),
-        length=PBKDF2_KEY_LEN,
+        length=length,
         salt=PBKDF2_SALT,
-        iterations=PBKDF2_ITERATIONS,
+        iterations=iterations,
     )
     return kdf.derive(password)
 
@@ -207,7 +242,7 @@ def _decrypt_chacha20_poly1305(ciphertext: bytes, key: bytes) -> bytes:
     return aead.decrypt(nonce, body + tag, associated_data=None)
 
 
-def _decrypt_value(encrypted: bytes, key: bytes, db_version: int) -> str:
+def _decrypt_value(encrypted: bytes, key: bytes, db_version: int, *, v11_key_len: int = 32) -> str:
     """Decrypt a single Chromium encrypted_value blob.
 
     Layout: version prefix (3 bytes "v10"/"v11"/"v20") || <ciphertext>
@@ -249,8 +284,9 @@ def _decrypt_value(encrypted: bytes, key: bytes, db_version: int) -> str:
         except UnicodeDecodeError:
             return plain.hex()
 
-    # v10 → AES-128, v11 → AES-256
-    key_len = 32 if prefix == b"v11" else 16
+    # v10 → AES-128. v11 is AES-256 on macOS upgrade paths, but Linux Chrome
+    # Safe Storage emits v11 AES-CBC blobs that decrypt with the 16-byte key.
+    key_len = v11_key_len if prefix == b"v11" else 16
     if len(key) < key_len:
         return ""
     cipher = Cipher(algorithms.AES(key[:key_len]), modes.CBC(CBC_IV))
@@ -327,9 +363,15 @@ def decrypt_chrome_cookies(
                     f"Cookie DB at {db} is not a Chromium Cookies DB (no meta.version row)"
                 ) from exc
 
+            is_linux = platform.system() == "Linux"
             if key is None:
-                password = keychain_password(keychain_service, keychain_account)
-                key = derive_aes_key(password)
+                if is_linux:
+                    password = linux_secret_storage_password(keychain_service)
+                    key = derive_aes_key(password, iterations=LINUX_PBKDF2_ITERATIONS)
+                else:
+                    password = keychain_password(keychain_service, keychain_account)
+                    key = derive_aes_key(password)
+            v11_key_len = 16 if is_linux else 32
 
             cookies: list[Cookie] = []
             query = (
@@ -346,7 +388,7 @@ def decrypt_chrome_cookies(
                 # half-written and a single bad row should not deny access
                 # to the rest of the user's session cookies.
                 try:
-                    value = _decrypt_value(encrypted, key, meta_version)
+                    value = _decrypt_value(encrypted, key, meta_version, v11_key_len=v11_key_len)
                 except Exception:
                     continue
                 if not value:
@@ -387,20 +429,29 @@ def write_cookies_json(cookies: Iterable[Cookie], out_path: str | Path) -> Path:
 def read_cookies_json(path: str | Path) -> list[Cookie]:
     """Read a cookies JSON file (Playwright storage_state format)."""
     data = json.loads(Path(path).read_text())
-    return [
-        Cookie(
-            name=c["name"],
-            value=c["value"],
-            domain=c["domain"],
-            path=c.get("path", "/"),
-            expires=c.get("expires", -1) if isinstance(c.get("expires"), (int, float)) else -1,
-            secure=c.get("secure", False),
-            httpOnly=c.get("httpOnly", False),
-            sameSite=c.get("sameSite", "Lax") if c.get("sameSite") in ("Strict", "Lax", "None") else "Lax",
-            host_only=bool(c.get("host_only", False)),
+    cookies: list[Cookie] = []
+    for c in data.get("cookies", []):
+        url = c.get("url")
+        domain = c.get("domain")
+        host_only = bool(c.get("host_only", False))
+        if not domain and url:
+            parsed = urlparse(url)
+            domain = parsed.hostname or ""
+            host_only = True
+        cookies.append(
+            Cookie(
+                name=c["name"],
+                value=c["value"],
+                domain=domain or "",
+                path=c.get("path", "/"),
+                expires=c.get("expires", -1) if isinstance(c.get("expires"), (int, float)) else -1,
+                secure=c.get("secure", False),
+                httpOnly=c.get("httpOnly", False),
+                sameSite=c.get("sameSite", "Lax") if c.get("sameSite") in ("Strict", "Lax", "None") else "Lax",
+                host_only=host_only,
+            )
         )
-        for c in data.get("cookies", [])
-    ]
+    return cookies
 
 
 __all__ = [
@@ -409,6 +460,7 @@ __all__ = [
     "decrypt_chrome_cookies",
     "derive_aes_key",
     "keychain_password",
+    "linux_secret_storage_password",
     "read_cookies_json",
     "write_cookies_json",
 ]
