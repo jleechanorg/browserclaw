@@ -135,11 +135,11 @@ def _is_default_chrome_root(root: Path) -> bool:
 
 def initialize_profile(
     name: str,
-    state_path: Path | str,
+    storage_state: Path | str,
     browser_channel: str = "chrome",
     profile_root: Optional[Path | str] = None,
 ) -> ProfileMetadata:
-    """Create a managed persistent profile and import *state_path*.
+    """Create a managed persistent profile and import *storage_state*.
     The state is applied once; subsequent runs reuse stored data.
     On any failure during browser launch or state import, the partially
     created profile directory is removed so the caller may safely retry.
@@ -153,7 +153,7 @@ def initialize_profile(
     try:
         if paths.user_data_dir.exists():
             raise ProfileError("Profile already exists")
-        state = load_profile_state(state_path)
+        state = load_profile_state(storage_state)
         # Create profile_root with mode 0o700 if it does not exist.
         # pathlib.Path.mkdir(parents=True, mode=...) does not propagate mode
         # to intermediate parent directories, so root must be created
@@ -165,34 +165,45 @@ def initialize_profile(
         except Exception:
             pass
         paths.user_data_dir.mkdir(mode=0o700, exist_ok=False)
-        try:
-            with sync_playwright() as pw:
-                context: BrowserContext = pw.chromium.launch_persistent_context(
+        with sync_playwright() as pw:
+            context: Optional[BrowserContext] = None
+            try:
+                context = pw.chromium.launch_persistent_context(
                     user_data_dir=str(paths.user_data_dir),
                     channel=browser_channel,
                     headless=True,
                 )
-                # Apply storage state using the most compatible Playwright API
-                if hasattr(context, "set_storage_state"):
-                    context.set_storage_state(state)
-                elif hasattr(context, "add_cookies"):
-                    # For cookie‑only state, add_cookies is sufficient
-                    cookies = state.get("cookies", [])
-                    context.add_cookies(cookies)
-                context.close()
+                context.set_storage_state(
+                    {"cookies": [], "origins": state["origins"]}
+                )
+                context.add_cookies(state["cookies"])
+            except Exception as exc:
+                raise ProfileError("Profile browser operation failed during initialization") from exc
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception as exc:
+                        raise ProfileError("Profile browser close failed") from exc
+        try:
+            sha = _hash_state_file(storage_state)
+            meta = ProfileMetadata(
+                name=name,
+                browser_channel=browser_channel,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                storage_state_sha256=sha,
+            )
+            _write_metadata(paths, meta)
+            return meta
         except Exception as exc:
-            # Remove partial profile so the caller may safely retry.
             shutil.rmtree(paths.user_data_dir, ignore_errors=True)
-            raise ProfileError(f"Browser launch failed: {type(exc).__name__}") from exc
-        sha = _hash_state_file(state_path)
-        meta = ProfileMetadata(
-            name=name,
-            browser_channel=browser_channel,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            storage_state_sha256=sha,
-        )
-        _write_metadata(paths, meta)
-        return meta
+            raise ProfileError("Profile metadata write failed") from exc
+    except ProfileError:
+        shutil.rmtree(paths.user_data_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(paths.user_data_dir, ignore_errors=True)
+        raise ProfileError("Profile initialization failed") from exc
     finally:
         lock.release()
 
@@ -237,30 +248,66 @@ def load_profile_state(state_path: Path | str) -> Dict[str, Any]:
     Normalizes cookies via :func:`browserclaw.cookies.read_cookies_json`
     so missing optional fields fall back to canonical safe defaults and
     invalid structures surface as :class:`ProfileError` rather than
-    leaking :class:`TypeError` or :class:`KeyError` to the caller.
-    Returns a dict compatible with Playwright's ``set_storage_state``.
+    leaking raw values or parser exceptions to the caller. Returns a dict
+    compatible with Playwright's ``set_storage_state``.
     """
     p = Path(state_path)
     if not p.is_file():
         raise ProfileError("State file does not exist")
     try:
         raw = json.loads(p.read_text())
-    except Exception as e:
-        # Never echo the input bytes back; secret-free message only.
-        raise ProfileError("Malformed JSON in state file") from e
-    if not isinstance(raw, dict) or "cookies" not in raw:
-        raise ProfileError("State file missing required 'cookies' key")
+    except Exception as exc:
+        raise ProfileError("Malformed JSON in state file") from exc
+    if not isinstance(raw, dict):
+        raise ProfileError("State file must contain a JSON object")
+    cookies = raw.get("cookies")
+    origins = raw.get("origins")
+    if not isinstance(cookies, list) or not isinstance(origins, list):
+        raise ProfileError("State cookies and origins must be lists")
     try:
-        cookies = read_cookies_json(p)
-    except Exception as e:
-        # read_cookies_json raises KeyError/TypeError on missing required
-        # cookie fields; wrap as ProfileError without echoing the input.
-        raise ProfileError("Invalid cookie structure in state file") from e
-    normalized = [c.to_playwright() for c in cookies]
-    result: Dict[str, Any] = {"cookies": normalized}
-    if "origins" in raw:
-        result["origins"] = raw["origins"]
-    return result
+        normalized = [cookie.to_playwright() for cookie in read_cookies_json(p)]
+    except Exception as exc:
+        raise ProfileError("Invalid cookie structure in state file") from exc
+    for origin in origins:
+        if not isinstance(origin, dict):
+            raise ProfileError("Invalid origin structure in state file")
+        origin_name = origin.get("origin")
+        local_storage = origin.get("localStorage")
+        indexed_db = origin.get("indexedDB")
+        if not isinstance(origin_name, str) or not origin_name:
+            raise ProfileError("Invalid origin structure in state file")
+        if not isinstance(local_storage, list):
+            raise ProfileError("Invalid localStorage structure in state file")
+        if not isinstance(indexed_db, list):
+            raise ProfileError("Invalid IndexedDB structure in state file")
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("value"), str)
+            for item in local_storage
+        ):
+            raise ProfileError("Invalid localStorage structure in state file")
+        for item in indexed_db:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("name"), str)
+                or not isinstance(item.get("version"), int)
+                or isinstance(item.get("version"), bool)
+            ):
+                raise ProfileError("Invalid IndexedDB structure in state file")
+            stores = item.get("stores")
+            data = item.get("data")
+            if stores is not None:
+                if not isinstance(stores, list) or any(
+                    not isinstance(store, dict)
+                    or not isinstance(store.get("name"), str)
+                    or not isinstance(store.get("records"), list)
+                    for store in stores
+                ):
+                    raise ProfileError("Invalid IndexedDB structure in state file")
+            elif not isinstance(data, dict):
+                raise ProfileError("Invalid IndexedDB structure in state file")
+    return {"cookies": normalized, "origins": origins}
 
 
 def _hash_state_file(state_path: Path | str) -> str:
@@ -276,13 +323,13 @@ def _hash_state_file(state_path: Path | str) -> str:
 
 def run_profile(
     name: str,
-    url: str,
+    goto: str,
     expect_selector: str,
     wait_after_load: float = 5.0,
     browser_channel: Optional[str] = None,
     profile_root: Optional[Path | str] = None,
 ) -> ProfileRunResult:
-    """Run a persisted profile against *url* and verify *expect_selector*.
+    """Run a persisted profile against *goto* and verify *expect_selector*.
     Does not re‑import the original state.
     """
     paths = resolve_profile_paths(name, profile_root)
@@ -298,44 +345,48 @@ def run_profile(
         # must not silently launch with stale browser state.
         if not paths.metadata_path.is_file():
             raise ProfileError("Profile metadata is missing; profile is not initialized")
-        meta_json = json.loads(paths.metadata_path.read_text())
-        meta = ProfileMetadata.from_dict(meta_json)
+        try:
+            meta = ProfileMetadata.from_dict(json.loads(paths.metadata_path.read_text()))
+        except Exception as exc:
+            raise ProfileError("Profile metadata is malformed") from exc
         channel = browser_channel or meta.browser_channel
         with sync_playwright() as pw:
-            context: BrowserContext = pw.chromium.launch_persistent_context(
-                user_data_dir=str(paths.user_data_dir),
-                channel=channel,
-                headless=True,
-            )
-            page: Page = context.new_page()
-            # Navigate if the Playwright API supports it; dummy objects may already have a pre‑set URL.
-            if hasattr(page, "goto"):
-                page.goto(url, wait_until="domcontentloaded")
-            else:
-                # Ensure the dummy page reports the expected URL.
-                if hasattr(page, "url"):
-                    page.url = url
-            # Allow any simulated load delay.
-            if hasattr(page, "wait_for_timeout"):
-                page.wait_for_timeout(wait_after_load * 1000)
-            # Verify the selector existence.
+            context: Optional[BrowserContext] = None
+            page: Optional[Page] = None
             try:
-                if hasattr(page, "wait_for_selector"):
-                    page.wait_for_selector(expect_selector, timeout=5000)
-                selector_visible = True
-            except Exception:
-                selector_visible = False
-            # Resolve title in a robust way (method or attribute).
-            title_val = page.title() if callable(getattr(page, "title", None)) else getattr(page, "title", "")
-            result = ProfileRunResult(
-                profile=name,
-                url=getattr(page, "url", ""),
-                title=title_val,
-                expected_selector_visible=selector_visible,
-                status="verified" if selector_visible else "not_verified",
-            )
-            context.close()
-            return result
+                context = pw.chromium.launch_persistent_context(
+                    user_data_dir=str(paths.user_data_dir),
+                    channel=channel,
+                    headless=True,
+                )
+                page = context.new_page()
+                page.goto(goto, wait_until="domcontentloaded")
+                page.wait_for_timeout(wait_after_load * 1000)
+                # Direct visibility check — absence returns False so we never
+                # misclassify unrelated exceptions as a browser failure.
+                selector_visible = page.locator(expect_selector).is_visible()
+                title_val = page.title()
+                result = ProfileRunResult(
+                    profile=name,
+                    url=page.url,
+                    title=title_val,
+                    expected_selector_visible=selector_visible,
+                    status="verified" if selector_visible else "not_verified",
+                )
+                return result
+            except Exception as exc:
+                raise ProfileError("Profile browser operation failed during run") from exc
+            finally:
+                if page is not None and hasattr(page, "close"):
+                    try:
+                        page.close()
+                    except Exception as exc:
+                        raise ProfileError("Profile page close failed") from exc
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception as exc:
+                        raise ProfileError("Profile browser close failed") from exc
     finally:
         lock.release()
 
@@ -360,4 +411,3 @@ def list_profiles(profile_root: Optional[Path | str] = None) -> List[ProfileMeta
                 continue
     metas.sort(key=lambda m: m.name)
     return metas
-
