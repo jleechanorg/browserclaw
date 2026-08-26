@@ -289,3 +289,41 @@ Register the `mcp_tools.json` with your agent's MCP server, or parse it and wire
 - **Authorized use only** — Inspect only sites you have permission to reverse-engineer.
 - **No browser extension** — All capture runs through Playwright + Chromium directly.
 - **Review generated code** — Client stubs and MCP tools are inferred from traffic, not audited APIs. Validate before production use.
+
+## Persistent headless profiles (state-preserving mode)
+
+`browserclaw profile` adds fully headless, browserclaw-managed persistent Chrome profiles for cases where a vendor session must survive across separate runs. Profiles are **always launched headlessly**, never copy or open your default Chrome profile, and never add stealth, fingerprint overrides, or CAPTCHA solvers.
+
+```bash
+browserclaw profile init web-advice-chatgpt \
+  --storage-state /secure/path/chatgpt-state.json --browser-channel chrome
+
+browserclaw profile run web-advice-chatgpt \
+  --goto https://chatgpt.com/ \
+  --expect-selector 'textarea, [contenteditable="true"]' --wait-after-load 8
+
+browserclaw profile list
+```
+
+Contract:
+
+- `profile init NAME --storage-state PATH [--browser-channel chrome] [--profile-root DIR]`
+- `profile run NAME --goto URL --expect-selector SEL [--wait-after-load 5.0] [--browser-channel CHANNEL] [--profile-root DIR]`
+- `profile list [--profile-root DIR]`
+
+Behavior:
+
+- `init` and `run` are fully headless — there is no `--headless` / `--manual` flag.
+- `verified` exits 0; `not_verified` exits nonzero so callers can branch on `$?`.
+- Output is bounded JSON; errors are `{"error": "profile_error", "code": "..."}` — exception text never reaches stdout.
+- Storage-state files carry HTTP cookies **plus** origin local storage and IndexedDB when those are present in the source file. Playwright does not serialize in-memory JavaScript state (e.g. Firebase Auth's `MemoryStorage`).
+- Profile names match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and are never interpreted as paths.
+- Default root is `~/.browserclaw/profiles/`; the directory is managed and isolated — browserclaw never touches Chrome's default user-data directory.
+- Verification is honest and selector-based: the caller supplies the DOM selector, and `not_verified` is a clean negative result — never a reason to add stealth or bypass code.
+
+## Guardrails (also apply to profiles)
+
+- **No auth bypass** — Manual auth only; profiles do not bypass login, MFA, or CAPTCHA.
+- **No stealth** — Default Chrome flags only. No `--disable-blink-features`, no fingerprint overrides.
+- **Secret-free diagnostics** — Errors carry only a structured `code`. Cookie values, storage contents, IndexedDB, page text, and the source state path are never serialized.
+- **Authorized use only** — Inspect only sites you have permission to access, even with a session-bearing profile.

@@ -108,7 +108,26 @@ user = auth.create_custom_token('user-id')  # returns bytes JWT
 print(f"Bearer {user.decode()}")
 ```
 
-Note: `--storage-state` only captures HTTP cookies, not Firebase Auth tokens (stored in memory/localStorage). Use `--extra-headers` or `--eval` for Firebase auth bypass.
+Note: `--storage-state` is a Playwright storage state JSON, which carries HTTP cookies **plus** origin state (local storage, IndexedDB) when the source file contains them. Playwright does not currently serialize in-memory JavaScript state such as Firebase Auth's `MemoryStorage`, so for those apps combine `--storage-state` with `--extra-headers` or `--eval` to inject test-mode tokens.
+
+## Persistent headless profiles
+
+For an authorized web session that should survive across separate runs (e.g. ChatGPT, Perplexity), `browserclaw profile` runs **fully headless, browserclaw-owned persistent Chrome profiles** — never your default Chrome profile, no headed mode, no stealth/CAPTCHA bypass. A vendor challenge that rejects headless Chrome is an honest `not_verified` outcome.
+
+Storage-state files contain cookies plus origin local storage and IndexedDB **when present in the source file** — Playwright round-trips them faithfully for supported origins. Playwright does not serialize in-memory JavaScript state (e.g. Firebase Auth's `MemoryStorage`).
+
+```bash
+browserclaw profile init web-advice-chatgpt \
+  --storage-state /secure/path/chatgpt-state.json --browser-channel chrome
+
+browserclaw profile run web-advice-chatgpt \
+  --goto https://chatgpt.com/ \
+  --expect-selector 'textarea, [contenteditable="true"]' --wait-after-load 8
+
+browserclaw profile list
+```
+
+Output is bounded JSON. A `verified` run exits 0; a `not_verified` selector result exits nonzero. Diagnostics never include cookie values, storage contents, page text, or the source state path. Profile names match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` and are never interpreted as paths. Use `--profile-root <dir>` for tests or for isolating profiles side by side.
 
 ## LLM-backed enrichment
 

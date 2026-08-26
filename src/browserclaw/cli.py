@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 from .capture import (
     capture_har,
@@ -24,6 +25,34 @@ from .generator import _slug_from_url, generate_bundle, generate_ws_bundle
 from .har import build_catalog_from_responses, infer_endpoint_catalog
 from .llm import enrich_catalog, plan_steps
 from .models import EndpointCatalog
+
+# Profile subcommand dispatch lives in `browserclaw.profiles`; CLI is a thin
+# JSON renderer over its dataclasses. Import is lazy so a sibling lane
+# without `profiles.py` does not break unrelated CLI commands; tests inject
+# a fake via sys.modules["browserclaw.profiles"].
+try:
+    from . import profiles as _profiles  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - dev-only fallback
+    _profiles = None  # type: ignore[assignment]
+
+
+def _profile_metadata_to_dict(meta: Any) -> dict:
+    return {
+        "name": meta.name,
+        "browser_channel": meta.browser_channel,
+        "created_at": meta.created_at,
+        "storage_state_sha256": meta.storage_state_sha256,
+    }
+
+
+def _profile_run_result_to_dict(result: Any) -> dict:
+    return {
+        "profile": result.profile,
+        "url": result.url,
+        "title": result.title,
+        "expected_selector_visible": result.expected_selector_visible,
+        "status": result.status,
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -249,6 +278,73 @@ def _build_parser() -> argparse.ArgumentParser:
         "--capture-evidence",
         action="store_true",
         help="Also capture screenshot and console logs to evidence/ subdirectory",
+    )
+
+    # ── Persistent profiles ────────────────────────────────────────────────────
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="Manage fully headless, browserclaw-owned persistent Chrome profiles.",
+    )
+    profile_sub = profile_parser.add_subparsers(dest="profile_action", required=True)
+
+    profile_init_p = profile_sub.add_parser(
+        "init",
+        help="Create a named, always-headless managed profile from a Playwright "
+             "storage state or browserclaw cookies file. Fails if it already exists.",
+    )
+    profile_init_p.add_argument(
+        "name",
+        help="Profile name (matches [A-Za-z0-9][A-Za-z0-9._-]{0,63}; never a path).",
+    )
+    profile_init_p.add_argument(
+        "--storage-state", required=True,
+        help="Path to a cookies.json or Playwright storage state JSON.",
+    )
+    profile_init_p.add_argument(
+        "--browser-channel", default="chrome",
+        help='Playwright browser channel (default: "chrome").',
+    )
+    profile_init_p.add_argument(
+        "--profile-root", default=None,
+        help="Override the default profile root (~/.browserclaw/profiles).",
+    )
+
+    profile_run_p = profile_sub.add_parser(
+        "run",
+        help="Launch an existing managed profile headlessly and verify a selector.",
+    )
+    profile_run_p.add_argument(
+        "name",
+        help="Profile name to launch (must have been `profile init`-ed).",
+    )
+    profile_run_p.add_argument(
+        "--goto", required=True,
+        help="URL to navigate to inside the persistent profile.",
+    )
+    profile_run_p.add_argument(
+        "--expect-selector", required=True,
+        help="CSS selector the caller treats as evidence of a verified render.",
+    )
+    profile_run_p.add_argument(
+        "--wait-after-load", type=float, default=5.0,
+        help="Seconds to wait after page.goto before checking the selector (default: 5).",
+    )
+    profile_run_p.add_argument(
+        "--browser-channel", default=None,
+        help="Override the persisted channel for this run.",
+    )
+    profile_run_p.add_argument(
+        "--profile-root", default=None,
+        help="Override the default profile root for this run.",
+    )
+
+    profile_list_p = profile_sub.add_parser(
+        "list",
+        help="List managed profiles and their non-secret metadata.",
+    )
+    profile_list_p.add_argument(
+        "--profile-root", default=None,
+        help="Override the default profile root for listing.",
     )
 
     return parser
@@ -731,6 +827,10 @@ def main() -> None:
         print(json.dumps({"mockset": str(mockset_path), **mockset_config}, indent=2))
         return
 
+    if args.command == "profile":
+        _cmd_profile(args)
+        return
+
     parser.error(f"Unhandled command: {args.command}")
 
 
@@ -825,6 +925,58 @@ async def _cmd_cookies_inject(args: argparse.Namespace) -> None:
             await context.close()
         finally:
             await browser.close()
+
+
+def _cmd_profile(args: argparse.Namespace) -> None:
+    """Thin JSON-renderer over `browserclaw.profiles`."""
+    if _profiles is None:  # pragma: no cover - dev-only fallback
+        print(json.dumps({
+            "error": "browserclaw.profiles module is not available",
+            "code": "profiles_module_missing",
+        }))
+        raise SystemExit(1)
+
+    try:
+        if args.profile_action == "init":
+            meta = _profiles.initialize_profile(
+                args.name,
+                args.storage_state,
+                browser_channel=args.browser_channel,
+                profile_root=args.profile_root,
+            )
+            print(json.dumps(_profile_metadata_to_dict(meta), indent=2))
+            return
+
+        if args.profile_action == "run":
+            result = _profiles.run_profile(
+                args.name,
+                args.goto,
+                args.expect_selector,
+                wait_after_load=args.wait_after_load,
+                browser_channel=args.browser_channel,
+                profile_root=args.profile_root,
+            )
+            print(json.dumps(_profile_run_result_to_dict(result), indent=2))
+            if result.status != "verified":
+                raise SystemExit(2)
+            return
+
+        if args.profile_action == "list":
+            items = _profiles.list_profiles(profile_root=args.profile_root)
+            print(json.dumps(
+                [_profile_metadata_to_dict(item) for item in items], indent=2,
+            ))
+            return
+
+    except _profiles.ProfileError as exc:
+        # Echo only the structured `code`; exception messages may carry secrets.
+        print(json.dumps({
+            "error": "profile_error",
+            "code": getattr(exc, "code", None) or "profile_error",
+        }, indent=2))
+        raise SystemExit(1)
+
+    raise SystemExit(f"Unknown profile action: {args.profile_action}")
 
 
 if __name__ == "__main__":
