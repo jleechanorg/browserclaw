@@ -96,6 +96,49 @@ def _build_cookie_db(db_path: Path, plaintext: bytes, host: str, name: str, db_v
     return encrypted
 
 
+def _build_cookie_db_with_key(
+    db_path: Path,
+    plaintext: bytes,
+    host: str,
+    name: str,
+    aes_key: bytes,
+    *,
+    prefix: bytes = b"v10",
+    db_version: int = 24,
+) -> bytes:
+    """Write one AES-CBC Chromium cookie row encrypted with an explicit key."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("create table meta (key text primary key, value text)")
+        conn.execute("insert into meta (key, value) values ('version', ?)", (str(db_version),))
+        conn.execute(
+            "create table cookies ("
+            "  host_key text, name text, path text, expires_utc integer,"
+            "  is_secure integer, is_httponly integer, samesite integer,"
+            "  encrypted_value blob"
+            ")"
+        )
+        body = plaintext
+        if db_version >= 24:
+            body = hashlib.sha256(host.encode("utf-8")).digest() + body
+        pad_len = 16 - (len(body) % 16)
+        padded = body + bytes([pad_len]) * pad_len
+        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(CBC_IV))
+        enc = cipher.encryptor()
+        encrypted = prefix + enc.update(padded) + enc.finalize()
+        import time
+
+        win_ft = int((time.time() + 30 * 86400 + 11644473600) * 1_000_000)
+        conn.execute(
+            "insert into cookies values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (host, name, "/", win_ft, 1, 1, 1, encrypted),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return encrypted
+
+
 @pytest.fixture
 def fake_cookie_db(tmp_path: Path) -> Path:
     db = tmp_path / "Cookies"
@@ -153,6 +196,25 @@ def test_decrypt_chrome_cookies_roundtrip(fake_cookie_db: Path, monkeypatch):
     assert c.httpOnly is True
     assert c.sameSite == "Lax"
     assert c.expires > 0
+
+
+def test_decrypt_chrome_cookies_linux_v11_secret_service_path(tmp_path: Path, monkeypatch):
+    """Linux path uses Secret Service, one PBKDF2 iteration, and v11 AES-128."""
+    import browserclaw.cookies as cookies_mod
+
+    db = tmp_path / "Cookies"
+    linux_key = derive_aes_key(PASSWORD, iterations=cookies_mod.LINUX_PBKDF2_ITERATIONS)
+    _build_cookie_db_with_key(db, VALUE.encode("utf-8"), "slack.com", NAME, linux_key, prefix=b"v11")
+
+    monkeypatch.setattr(cookies_mod.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cookies_mod, "linux_secret_storage_password", lambda *a, **k: PASSWORD)
+    monkeypatch.setattr(cookies_mod, "keychain_password", lambda *a, **k: (_ for _ in ()).throw(AssertionError("macOS keychain should not be used")))
+
+    cookies = decrypt_chrome_cookies(db, domain_filter="%slack.com%")
+    assert len(cookies) == 1
+    assert cookies[0].name == NAME
+    assert cookies[0].value == VALUE
+    assert cookies[0].host_only is True
 
 
 def test_decrypt_chrome_cookies_missing_db(tmp_path: Path, monkeypatch):
@@ -280,6 +342,25 @@ def test_decrypt_value_v10_still_aes_after_v20_path_added():
     assert out == plaintext.decode("utf-8")
 
 
+def test_decrypt_value_v11_linux_aes128_roundtrip():
+    """Linux Chrome Safe Storage v11 cookies can decrypt with AES-128-CBC."""
+    from browserclaw.cookies import LINUX_PBKDF2_ITERATIONS, _decrypt_value
+
+    aes_key = derive_aes_key(PASSWORD, iterations=LINUX_PBKDF2_ITERATIONS)
+    host = "slack.com"
+    plaintext = b"xoxd-linux-v11-payload"
+
+    body = hashlib.sha256(host.encode("utf-8")).digest() + plaintext
+    pad_len = 16 - (len(body) % 16)
+    padded = body + bytes([pad_len]) * pad_len
+    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(CBC_IV))
+    enc = cipher.encryptor()
+    encrypted = b"v11" + enc.update(padded) + enc.finalize()
+
+    out = _decrypt_value(encrypted, aes_key, db_version=24, v11_key_len=16)
+    assert out == plaintext.decode("utf-8")
+
+
 def test_decrypt_value_unrecognized_prefix_returns_empty():
     """A blob with neither v10/v11/v20 prefix returns '' instead of crashing."""
     from browserclaw.cookies import _decrypt_value
@@ -312,8 +393,55 @@ def test_to_playwright_host_only_cookie_not_widened():
     # itself must NOT get a leading dot (would widen scope to all subdomains).
     assert "domain" not in pw
     assert pw["url"] == "https://slack.com/"
+    assert "path" not in pw
     assert pw["expires"] == -1
     assert pw["sameSite"] == "Lax"
+
+
+def test_to_playwright_host_only_cookie_injects_into_real_playwright_context():
+    """Regression test for 'Cookie should have either url or path'.
+
+    Root cause: Playwright's server/network.js asserts
+    ``assert(!(c.url && c.path), 'Cookie should have either url or path')`` —
+    a cookie dict must carry ``url`` XOR (``domain`` + ``path``), never
+    ``url`` *and* ``path`` together. The pre-fix ``to_playwright()`` always
+    included ``path`` in the dict and then, for host-only cookies (the shape
+    ``decrypt_chrome_cookies()`` produces for a Chrome ``host_key`` with no
+    leading dot — the common case for GNOME-Secret-Service-sourced Linux
+    cookie DBs), *added* ``url`` without removing ``path``, so
+    ``context.add_cookies()`` always raised on host-only cookies.
+
+    This exercises the real Playwright assertion end-to-end instead of just
+    inspecting the dict shape, so a future change that reintroduces both
+    keys fails loudly here rather than only downstream in production.
+    """
+    playwright_sync = pytest.importorskip("playwright.sync_api")
+
+    c = Cookie(
+        name="d", value="xoxd-repro-value", domain="slack.com", path="/",
+        expires=-1, secure=True, httpOnly=True, sameSite="Lax",
+        host_only=True,
+    )
+    pw_cookie = c.to_playwright()
+    assert not ("url" in pw_cookie and "path" in pw_cookie), (
+        "cookie dict must not carry both url and path"
+    )
+
+    try:
+        with playwright_sync.sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                context = browser.new_context()
+                try:
+                    context.add_cookies([pw_cookie])
+                finally:
+                    context.close()
+            finally:
+                browser.close()
+    except Exception as exc:  # pragma: no cover - environment dependent
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc):
+            pytest.skip(f"Playwright browser binaries not installed: {exc}")
+        raise
 
 
 def test_to_playwright_rejects_invalid_samesite():
@@ -384,3 +512,27 @@ def test_write_read_cookies_json_preserves_host_only(tmp_path: Path):
     assert read_back[0].domain == "slack.com"
     assert read_back[1].host_only is False
     assert read_back[1].domain == ".slack.com"
+
+
+def test_read_cookies_json_accepts_playwright_url_cookie(tmp_path: Path):
+    out = tmp_path / "storage-state.json"
+    out.write_text(json.dumps({
+        "cookies": [
+            {
+                "name": "d",
+                "value": "xoxd-abc",
+                "url": "https://slack.com/",
+                "expires": 1816379970,
+                "secure": True,
+                "httpOnly": True,
+                "sameSite": "Lax",
+            }
+        ],
+        "origins": [],
+    }))
+
+    read_back = read_cookies_json(out)
+    assert len(read_back) == 1
+    assert read_back[0].host_only is True
+    assert read_back[0].domain == "slack.com"
+    assert read_back[0].to_playwright()["url"] == "https://slack.com/"
